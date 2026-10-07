@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+  
+  .font-mono, .tabular-nums {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media print {
+  /* Page margins & printer setup */
+  @page {
+    margin: 0;
+    size: auto;
+  }
+
+  @page a5-invoice {
+    size: 148mm 210mm;
+    margin: 4mm;
+  }
+
+  html, body {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    height: 100% !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  
+  .no-print {
+    display: none !important;
+  }
+  
+  .print-only {
+    display: block !important;
+  }
+
+  .print-break-after {
+    page-break-after: always;
+    break-after: page;
+  }
+
+  .print-no-break {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  
+  /* Make sure borders print sharply */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* ==========================================================================
+     Invoice print layout (A4 / A5). The on-screen preview is zoomed to fit phones;
+     printing resets that so the sheet prints at true paper size.
+     ========================================================================== */
+  @page inv-a4 {
+    size: 210mm 297mm;
+    margin: 0;
+  }
+  @page inv-a5 {
+    size: 148mm 210mm;
+    margin: 0;
+  }
+
+  main {
+    padding: 0 !important;
+  }
+
+  .tb-invoice-wrap {
+    overflow: visible !important;
+  }
+
+  .tb-invoice-zoom {
+    zoom: 1 !important;
+    width: auto !important;
+    margin: 0 !important;
+  }
+
+  .tb-invoice-sheet {
+    border: 0 !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+  }
+
+  .tb-invoice-sheet[data-page-size="A4"] {
+    page: inv-a4;
+    width: 210mm !important;
+    min-height: 296mm !important;
+    padding: 6mm !important;
+  }
+
+  .tb-invoice-sheet[data-page-size="A5"] {
+    page: inv-a5;
+    width: 148mm !important;
+    min-height: 209mm !important;
+    padding: 4mm !important;
+  }
+}
