@@ -38,6 +38,43 @@ export function notifyUser(message: string) {
   window.dispatchEvent(new CustomEvent(NOTICE_EVENT, { detail: { message } }));
 }
 
+
+/* ---------- Android app (Capacitor APK) support ----------
+ * Inside the APK the web view cannot download blob files, so files are written to the phone's cache
+ * and handed to Android's share sheet (Save to Drive / Files, open in a PDF viewer, WhatsApp, Print...). */
+function isNativeApp(): boolean {
+  try {
+    return !!(window as any).Capacitor?.isNativePlatform?.();
+  } catch {
+    return false;
+  }
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function nativeShareFile(filename: string, blob: Blob, text?: string): Promise<boolean> {
+  try {
+    const { Filesystem, Directory } = await import('@capacitor/filesystem');
+    const { Share } = await import('@capacitor/share');
+    const data = await blobToBase64(blob);
+    const saved = await Filesystem.writeFile({ path: filename, data, directory: Directory.Cache });
+    await Share.share({ title: filename, text, url: saved.uri, dialogTitle: 'Save or share' });
+    return true;
+  } catch (err: any) {
+    if (err && /cancel/i.test(String(err.message || err))) return true;
+    console.error('Native share failed', err);
+    notifyUser('Could not open the share sheet for this file.');
+    return false;
+  }
+}
+
 function toBlob(content: string | Uint8Array | Blob, contentType: string): Blob {
   if (content instanceof Blob) return content;
   return new Blob([content as BlobPart], { type: contentType });
@@ -75,6 +112,10 @@ function announceFile(filename: string, url: string, blob: Blob) {
 /** Save a file (download). Content can be text, bytes or a Blob. */
 export function downloadFile(filename: string, content: string | Uint8Array | Blob, contentType: string = 'text/plain') {
   const blob = toBlob(content, contentType);
+  if (isNativeApp()) {
+    void nativeShareFile(filename, blob);
+    return;
+  }
   const url = URL.createObjectURL(blob);
   try {
     clickLink(url, filename, false);
@@ -87,6 +128,10 @@ export function downloadFile(filename: string, content: string | Uint8Array | Bl
 /** Open a file in a new tab (used for PDFs so the phone's own viewer can print / share it). */
 export function openFileInTab(filename: string, content: Uint8Array | Blob, contentType: string) {
   const blob = toBlob(content, contentType);
+  if (isNativeApp()) {
+    void nativeShareFile(filename, blob);
+    return;
+  }
   const url = URL.createObjectURL(blob);
   try {
     clickLink(url, null, true);
@@ -104,6 +149,9 @@ export async function shareFile(
   text?: string
 ): Promise<'shared' | 'cancelled' | 'unsupported'> {
   const blob = toBlob(content, contentType);
+  if (isNativeApp()) {
+    return (await nativeShareFile(filename, blob, text)) ? 'shared' : 'unsupported';
+  }
   try {
     const file = new File([blob], filename, { type: contentType });
     const nav: any = navigator;
@@ -209,4 +257,4 @@ export function checkBackupReminder(lastBackupDateStr?: string): { isOverdue: bo
     isOverdue: diffDays >= 7,
     daysAgo: diffDays,
   };
-}
+    }
