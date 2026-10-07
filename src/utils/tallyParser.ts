@@ -148,7 +148,7 @@ export function parseTallyXml(xmlString: string): TallyParseResult {
   const warnings: string[] = [];
 
   const parser = new DOMParser();
-  const xmlDoc = parser.parseFromString(xmlString, 'text/xml');
+  const xmlDoc = parser.parseFromString(cleanTallyXml(xmlString), 'text/xml');
 
   // Check for XML parsing error
   const parserError = xmlDoc.querySelector('parsererror');
