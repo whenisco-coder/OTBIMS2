@@ -122,7 +122,23 @@ export function cleanTallyNumber(val: string | null | undefined): number {
   const num = parseFloat(parts[0]);
   return isNaN(num) ? 0 : Math.abs(num);
 }
+/** Reads a Tally file as text. Tally often saves XML as UTF-16, which normal text reading turns into garbage. */
+export async function readTallyFile(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const b = new Uint8Array(buf);
+  let enc = 'utf-8';
+  if (b[0] === 0xff && b[1] === 0xfe) enc = 'utf-16le';
+  else if (b[0] === 0xfe && b[1] === 0xff) enc = 'utf-16be';
+  else if (b.length > 3 && b[1] === 0 && b[3] === 0) enc = 'utf-16le';
+  return new TextDecoder(enc).decode(buf);
+}
 
+/** Removes characters XML does not allow (Tally writes &#4; and raw control codes). */
+export function cleanTallyXml(xml: string): string {
+  return xml
+    .replace(/&#(?:[0-8]|1[1-2]|1[4-9]|2\d|3[01]);/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+    }
 // Parse Tally XML (TallyPrime / Tally ERP 9)
 export function parseTallyXml(xmlString: string): TallyParseResult {
   const stockItems: TallyStockItem[] = [];
