@@ -2,7 +2,7 @@
  * Smart customer paste parser.
  *
  * Paste anything like a WhatsApp / Amazon / Flipkart / courier address block and this pulls out
- * name, mobile, pincode, state, GSTIN, city and the remaining address line.
+ * name, mobile, email, pincode, state, GSTIN, city and the remaining address line.
  * It is a best-guess helper: the form always stays editable, so wrong guesses are one tap to fix.
  */
 
@@ -44,6 +44,8 @@ export const GST_STATES: { name: string; code: string }[] = [
   { name: 'Andhra Pradesh', code: '37' },
   { name: 'Ladakh', code: '38' },
 ];
+
+const DNH_DD = 'Dadra & Nagar Haveli and Daman & Diu';
 
 export function stateCodeFor(stateName: string): string {
   const clean = (stateName || '').trim().toLowerCase();
@@ -89,7 +91,7 @@ const STATE_ALIASES: Record<string, string> = {
   'chattisgarh': 'Chhattisgarh',
   'madhya pradesh': 'Madhya Pradesh',
   'gujarat': 'Gujarat',
-  'daman and diu': 'Dadra & Nagar Haveli and Daman & Diu',
+  'daman and diu': DNH_DD,
   'maharashtra': 'Maharashtra',
   'karnataka': 'Karnataka',
   'goa': 'Goa',
@@ -119,9 +121,10 @@ export function stateFromPincode(pin: string): string {
   if (p3 >= 744 && p3 <= 744) return 'Andaman & Nicobar Islands';
   if (p3 === 737) return 'Sikkim';
   if (p3 === 160) return 'Chandigarh';
+  if (p3 === 194) return 'Ladakh';
   if (p3 >= 244 && p3 <= 263) return 'Uttarakhand';
   if (p3 >= 396 && p3 <= 396 && pin.startsWith('3962')) return 'Gujarat';
-  if (p3 === 396 && (pin.startsWith('3962') || pin.startsWith('3963'))) return 'Dadra & Nagar Haveli and Daman & Diu';
+  if (p3 === 396 && (pin.startsWith('3962') || pin.startsWith('3963'))) return DNH_DD;
   if (p3 >= 790 && p3 <= 792) return 'Arunachal Pradesh';
   if (p3 >= 793 && p3 <= 794) return 'Meghalaya';
   if (p3 >= 795 && p3 <= 795) return 'Manipur';
@@ -155,10 +158,18 @@ export function stateFromPincode(pin: string): string {
 
 export interface ParsedCustomer {
   name: string;
+  /** first mobile found, 10 digits */
   phone: string;
+  /** second mobile found (if any), 10 digits, for Private Notes */
+  altPhone: string;
+  email: string;
   pincode: string;
   state: string;
   stateCode: string;
+  /** state worked out from the pincode alone (used for the mismatch warning) */
+  pinState: string;
+  /** true when the GSTIN state and the pincode state are different */
+  stateMismatch: boolean;
   city: string;
   addressLine: string;
   gstin: string;
@@ -168,6 +179,7 @@ export interface ParsedCustomer {
   found: {
     name: boolean;
     phone: boolean;
+    email: boolean;
     pincode: boolean;
     state: boolean;
     city: boolean;
@@ -177,8 +189,10 @@ export interface ParsedCustomer {
 }
 
 const GSTIN_RE = /\b(\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z])\b/i;
-// Indian mobile: optional +91 / 91 / 0, then 10 digits starting 6-9, spaces or hyphens allowed inside.
-const PHONE_RE = /(?<!\d)(?:\+?\s*91[\s-]*|0)?([6-9](?:[\s-]?\d){9})(?!\d)/;
+// Indian mobile: optional +91 / 91 / 0, then 10 digits starting 6-9.
+// Spaces, hyphens, dots and brackets are allowed inside, e.g. +91 98250 98250, 98250.98250, (98250) 98250.
+const PHONE_RE = /(?<!\d)(?:\+?\s*91[\s.\-()]*|0)?\(?([6-9](?:[\s.\-()]?\d){9})(?!\d)/;
+const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/i;
 const PIN_RE = /(?<!\d)([1-9]\d{2})[\s-]?(\d{3})(?!\d)/;
 const COMPANY_RE =
   /\b(pvt|private|ltd|limited|llp|llc|enterprise|enterprises|traders|trading|motors|motor|tyres|tyre|tires|auto|automobiles|automobile|garage|works|agency|agencies|stores|store|sports|industries|corporation|corp|co\.|company|bros|brothers|sons|distributors|wheels|cycles|cycle|bike|bikes)\b/i;
@@ -191,21 +205,25 @@ function cleanSpaces(s: string): string {
 }
 
 function stripEdgePunct(s: string): string {
-  return s.replace(/^[\s,;:\-–|/.]+|[\s,;:\-–|/]+$/g, '').trim();
+  return s.replace(/^[\s,;:\-–|/.#]+|[\s,;:\-–|/#]+$/g, '').trim();
 }
 
 export function parseCustomerText(raw: string): ParsedCustomer {
   const result: ParsedCustomer = {
     name: '',
     phone: '',
+    altPhone: '',
+    email: '',
     pincode: '',
     state: '',
     stateCode: '',
+    pinState: '',
+    stateMismatch: false,
     city: '',
     addressLine: '',
     gstin: '',
     type: 'B2C',
-    found: { name: false, phone: false, pincode: false, state: false, city: false, address: false, gstin: false },
+    found: { name: false, phone: false, email: false, pincode: false, state: false, city: false, address: false, gstin: false },
   };
 
   if (!raw || !raw.trim()) return result;
@@ -230,29 +248,44 @@ export function parseCustomerText(raw: string): ParsedCustomer {
   const labelledAddr = takeLabel(['delivery address', 'shipping address', 'address', 'addr'], true);
   if (labelledAddr) text += '\n' + labelledAddr;
 
+  // 1b. Email (before mobile and pincode so digits inside an email are never read as a number)
+  const emailMatch = text.match(EMAIL_RE);
+  if (emailMatch) {
+    result.email = emailMatch[0].toLowerCase();
+    result.found.email = true;
+    text = text.replace(emailMatch[0], ' ');
+  }
+  text = text.replace(/\b(?:e-?mail|mail)\s*(?:id|address)?\s*[:=\-]?\s*(?=[,\n]|$)/gi, ' ');
+
   // 2. GSTIN
   const gstMatch = text.match(GSTIN_RE);
   if (gstMatch) {
     result.gstin = gstMatch[1].toUpperCase();
     result.found.gstin = true;
     text = text.replace(gstMatch[0], ' ');
-    text = text.replace(/\b(?:gstin|gst\s*no|gst|uin)\s*[:=\-]?\s*/gi, ' ');
+    // removes "GSTIN:", "GST No.", "GST #" and similar labels
+    text = text.replace(/\b(?:gstin|gst\s*no|gst|uin)\s*(?:no\.?|number)?\s*[:=\-#.]*\s*/gi, ' ');
   }
 
   // 3. Mobile (do this BEFORE pincode so the 10 digits never get mistaken for a pincode)
   // Collect every number that looks like a mobile; prefer bare / +91 numbers over 0-prefixed (landline style) ones.
+  // The first one is kept as the phone, the next different one becomes the alternate mobile.
   const phoneCandidates: { digits: string; zeroPrefixed: boolean }[] = [];
   const phoneRe = new RegExp(PHONE_RE.source, 'g');
   const scanText = (labelledPhone ? labelledPhone + '\n' : '') + text;
   let pm: RegExpExecArray | null;
   while ((pm = phoneRe.exec(scanText)) !== null) {
     const full = pm[0].trim();
-    phoneCandidates.push({ digits: pm[1].replace(/\D/g, ''), zeroPrefixed: /^0/.test(full) && !/^\+?\s*91/.test(full) });
+    const digits = pm[1].replace(/\D/g, '');
+    if (phoneCandidates.some(c => c.digits === digits)) continue;
+    phoneCandidates.push({ digits, zeroPrefixed: /^0/.test(full) && !/^\+?\s*91/.test(full) });
   }
   text = text.replace(new RegExp(PHONE_RE.source, 'g'), ' ');
   if (phoneCandidates.length > 0) {
     const best = phoneCandidates.find(c => !c.zeroPrefixed) || phoneCandidates[0];
     result.phone = best.digits;
+    const other = phoneCandidates.find(c => c !== best);
+    if (other) result.altPhone = other.digits;
   }
   result.found.phone = result.phone.length === 10;
   // remove leftover phone labels (Ph, Mob, Contact...) with no number after them
@@ -292,9 +325,19 @@ export function parseCustomerText(raw: string): ParsedCustomer {
     }
   }
   const stateFromPin = stateFromPincode(result.pincode);
+  result.pinState = stateFromPin;
   result.state = stateFromGstin || writtenState || stateFromPin;
   result.stateCode = stateCodeFor(result.state);
   result.found.state = !!result.state;
+  // GSTIN state wins, but warn when the pincode points to a different state.
+  // Dadra & Nagar Haveli / Daman & Diu pincodes are skipped because they sit next to Gujarat ranges.
+  result.stateMismatch = !!(
+    stateFromGstin &&
+    stateFromPin &&
+    stateFromGstin !== stateFromPin &&
+    stateFromGstin !== DNH_DD &&
+    stateFromPin !== DNH_DD
+  );
 
   text = text.replace(/\bindia\b/gi, ' ');
 
@@ -304,13 +347,14 @@ export function parseCustomerText(raw: string): ParsedCustomer {
     .map(l => stripEdgePunct(cleanSpaces(l)))
     .filter(l => l.length > 0 && !LABEL_PREFIX_RE.test(l));
 
-  // 7. Name
+  // 7. Name (first line only: person or company)
   const looksLikeName = (s: string) => {
     if (!s) return false;
     if (/\d/.test(s)) return false;
     if (s.length < 2 || s.length > 60) return false;
     if (s.split(' ').length > 7) return false;
-    if (/\b(road|rd|street|st|nagar|colony|society|apartment|flat|plot|near|opp|opposite|behind|market|chowk|gali|lane|village|post|tal|taluka|dist|district|sector|phase|block|floor|building|bldg|complex|tower|towers|park|circle|cross|main|layout|extension|ext)\b/i.test(s)) return false;
+    // company-style names may contain words like "road" or "main", so skip the address-word check for them
+    if (!COMPANY_RE.test(s) && /\b(road|rd|street|st|nagar|colony|society|apartment|flat|plot|near|opp|opposite|behind|market|chowk|gali|lane|village|post|tal|taluka|dist|district|sector|phase|block|floor|building|bldg|complex|tower|towers|park|circle|cross|main|layout|extension|ext)\b/i.test(s)) return false;
     return true;
   };
 
@@ -367,4 +411,5 @@ export function parseCustomerText(raw: string): ParsedCustomer {
 /** Quick check used by the UI to warn on obviously wrong mobile numbers. */
 export function isValidIndianMobile(phone: string): boolean {
   return /^[6-9]\d{9}$/.test((phone || '').replace(/\D/g, '').slice(-10));
-}
+   }
+  
