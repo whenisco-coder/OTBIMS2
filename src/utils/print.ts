@@ -224,3 +224,20 @@ export async function printInvoice(opts: PrintOptions): Promise<PrintResult> {
     return 'failed';
   }
 }
+/* ------------------------------------------------------------------ */
+/*  Backward-compat: simple page print for non-invoice views          */
+/*  (Products, Reports, Ledger, Shipping Label, etc.)                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Plain "print this page" helper. Used by views that just want the browser
+ * print dialog (no PDF, no share sheet). The invoice system uses
+ * `printInvoice` above instead.
+ */
+export function safePrint(): void {
+  try {
+    window.print();
+  } catch (err) {
+    console.error('Print failed', err);
+  }
+}
