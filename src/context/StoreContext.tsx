@@ -163,6 +163,9 @@ interface StoreContextType extends StoreState {
     errors: string[];
   };
 
+  importTallyOrders: (orders: Order[], newCustomers: Customer[]) => { added: number };
+  markOrdersTallyExported: (orderIds: string[]) => void;
+
   // Stock & FIFO
   adjustStock: (params: {
     productId: string;
@@ -945,8 +948,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       defaultLocation?: StockLocation;
       defaultGst?: number;
       skipDuplicates?: boolean;
+      updateExisting?: boolean;
     }
   ): {
+    updatedProducts?: number;
     importedProducts: number;
     importedBatches: number;
     importedCustomers: number;
@@ -967,6 +972,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     let importedCustomers = 0;
     let importedSuppliers = 0;
     let skipped = 0;
+    let updatedProducts = 0;
+    const productUpdates = new Map<string, { hsn?: string; gstPercent?: number }>();
 
     const newProducts: Product[] = [];
     const newBatches: StockBatch[] = [];
@@ -984,13 +991,20 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
 
         // Duplicate check
-        const isDuplicate =
-          state.products.some(
-            p => p.name.trim().toLowerCase() === cleanName.toLowerCase() && p.hsn === item.hsnCode
-          ) ||
-          newProducts.some(
-            p => p.name.trim().toLowerCase() === cleanName.toLowerCase()
-          );
+        const sameName = (n: string) => n.replace(/\s+/g, ' ').trim().toLowerCase() === cleanName.replace(/\s+/g, ' ').toLowerCase();
+        const existing = state.products.find(p => sameName(p.name));
+        const isDuplicate = !!existing || newProducts.some(p => sameName(p.name));
+
+        if (existing && options?.updateExisting) {
+          // Tally is the master for tax details: refresh GST and HSN only. Prices, stock and names are never touched.
+          const upd: { hsn?: string; gstPercent?: number } = {};
+          if (item.gstRate > 0 && existing.gstPercent !== item.gstRate) upd.gstPercent = item.gstRate;
+          if (item.hsnCode && existing.hsn !== item.hsnCode) upd.hsn = item.hsnCode;
+          if (upd.gstPercent !== undefined || upd.hsn !== undefined) {
+            productUpdates.set(existing.id, upd);
+            updatedProducts++;
+          }
+        }
 
         if (isDuplicate && skipDuplicates) {
           skipped++;
@@ -1002,14 +1016,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           id: prodId,
           name: cleanName,
           type: 'Single',
-          category: item.category || 'Passenger Car Tyres',
-          brand: item.brand || 'Tyrebuddy',
-          hsn: item.hsnCode || '40111010',
-          gstPercent: item.gstRate || (options?.defaultGst ?? 28),
+          category: item.category || 'General',
+          brand: item.brand || '',
+          // Nothing is guessed: blanks stay blank and show up in the "needs details" flags
+          hsn: item.hsnCode || '',
+          gstPercent: item.gstRate || 0,
           costPrice: item.costPrice,
           retailPrice: item.retailPrice,
-          mrp: item.mrp || Math.round(item.retailPrice * 1.12),
-          warrantyMonths: 36,
+          mrp: item.mrp || 0,
+          warrantyMonths: 0,
           lowStockThreshold: 10,
           hasBattery: (item.category || '').toLowerCase().includes('battery') || item.name.toLowerCase().includes('battery'),
           sku: item.sku || (item.partNo ? item.partNo : undefined),
@@ -1054,11 +1069,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!cleanName) return;
 
         if (shouldImportDebtors && ledger.ledgerType === 'SUNDRY_DEBTOR') {
+          // Cash-sales placeholder ledgers are not real customers
+          if (/^cash sales/i.test(cleanName)) {
+            skipped++;
+            return;
+          }
           const cleanPhone = (ledger.phone || '').replace(/\D/g, '');
+          const sameName = (n: string) => n.replace(/[\s,]+$/g, '').trim().toLowerCase() === cleanName.replace(/[\s,]+$/g, '').trim().toLowerCase();
           const isPhoneDup =
-            cleanPhone.length === 10 &&
-            (state.customers.some(c => c.phone === cleanPhone) ||
-              newCustomers.some(c => c.phone === cleanPhone));
+            (cleanPhone.length === 10 &&
+              (state.customers.some(c => c.phone === cleanPhone) || newCustomers.some(c => c.phone === cleanPhone))) ||
+            state.customers.some(c => sameName(c.name)) ||
+            newCustomers.some(c => sameName(c.name));
 
           if (isPhoneDup && skipDuplicates) {
             skipped++;
@@ -1066,10 +1088,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
 
           const custId = 'cust-tally-' + Date.now() + '-' + idx;
-          const phoneToUse =
-            cleanPhone.length === 10
-              ? cleanPhone
-              : `9879${(Date.now() % 1000000).toString().padStart(6, '0')}`;
+          const phoneToUse = cleanPhone.length === 10 ? cleanPhone : '';
 
           newCustomers.push({
             id: custId,
@@ -1085,10 +1104,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               {
                 id: 'addr-tally-' + Date.now() + '-' + idx,
                 label: 'Tally Master',
-                addressLine: ledger.address || 'Surat',
-                city: 'Surat',
+                addressLine: ledger.address || '',
+                city: ledger.city || '',
                 state: ledger.stateName || 'Gujarat',
-                pincode: ledger.pincode || '395002',
+                pincode: ledger.pincode || '',
                 isDefault: true,
               },
             ],
@@ -1109,9 +1128,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           newSuppliers.push({
             id: 'supp-tally-' + Date.now() + '-' + idx,
             name: cleanName,
-            phone: ledger.phone || '9879000000',
+            phone: ledger.phone || '',
             gstin: ledger.gstin || '',
-            address: ledger.address || 'Surat, Gujarat',
+            address: ledger.address || '',
             state: ledger.stateName || 'Gujarat',
             notes: `Imported from Tally. Opening balance: ₹${ledger.openingBalance} (${ledger.balanceType}). Group: ${ledger.parentGroup}`,
           });
@@ -1124,11 +1143,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       newProducts.length > 0 ||
       newCustomers.length > 0 ||
       newSuppliers.length > 0 ||
-      newBatches.length > 0
+      newBatches.length > 0 ||
+      productUpdates.size > 0
     ) {
       setState(prev => ({
         ...prev,
-        products: [...newProducts, ...prev.products],
+        products: [
+          ...newProducts,
+          ...prev.products.map(p => {
+            const u = productUpdates.get(p.id);
+            return u ? { ...p, ...u } : p;
+          }),
+        ],
         stockBatches: [...newBatches, ...prev.stockBatches],
         stockMovements: [...newMovements, ...prev.stockMovements],
         customers: [...newCustomers, ...prev.customers],
@@ -1141,12 +1167,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         `Tally Migration: Imported ${importedProducts} products, ${importedBatches} batches, ${importedCustomers} customers, ${importedSuppliers} suppliers`
       );
       showToast(
-        `Tally Import Complete! ${importedProducts} products, ${importedBatches} batches, ${importedCustomers} debtors, ${importedSuppliers} creditors.`,
+        `Tally import done: ${importedProducts} new products, ${updatedProducts} GST/HSN updated, ${importedBatches} stock batches, ${importedCustomers} customers, ${importedSuppliers} suppliers.`,
         'success'
       );
     }
 
     return {
+      updatedProducts,
       importedProducts,
       importedBatches,
       importedCustomers,
@@ -1154,6 +1181,28 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       skipped,
       errors,
     };
+  };
+
+  const importTallyOrders = (newOrders: Order[], newCustomers: Customer[]): { added: number } => {
+    if (newOrders.length === 0 && newCustomers.length === 0) return { added: 0 };
+    setState(prev => ({
+      ...prev,
+      customers: [...newCustomers, ...prev.customers],
+      orders: [...newOrders, ...prev.orders],
+    }));
+    logAudit('CREATE', 'TallyImport', `Imported ${newOrders.length} old sales vouchers from Tally (${newCustomers.length} new customers)`);
+    showToast(`Imported ${newOrders.length} old orders from Tally`, 'success');
+    return { added: newOrders.length };
+  };
+
+  const markOrdersTallyExported = (orderIds: string[]) => {
+    if (orderIds.length === 0) return;
+    const ids = new Set(orderIds);
+    const now = new Date().toISOString();
+    setState(prev => ({
+      ...prev,
+      orders: prev.orders.map(o => (ids.has(o.id) ? { ...o, tallyExportedAt: now } : o)),
+    }));
   };
 
   // Stock & FIFO
@@ -2533,6 +2582,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         backupHistory: state.backupSnapshots,
         importProductsCsv,
         importTallyData,
+        importTallyOrders,
+        markOrdersTallyExported,
         restoreFromSnapshot,
         validateBackupJson,
         restoreFromJson,
