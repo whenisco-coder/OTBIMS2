@@ -51,7 +51,7 @@ export function defaultInvoiceOptions(order: Order, settings?: Partial<BusinessS
   const isB2B = order.customerType === 'B2B';
   return {
     mode: 'TAX',
-    paper: 'A4',
+    paper: 'A5',
     hiddenItemIds: [],
     roundTo: 1,
     show: {
