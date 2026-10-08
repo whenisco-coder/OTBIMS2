@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../../context/StoreContext';
 import type { Order } from '../../types';
 import {
@@ -12,7 +12,9 @@ import {
   fmtMoney,
   DEFAULT_DECLARATION,
 } from '../../utils/invoiceModel';
-import { safePrint } from '../../utils/print';
+import { printInvoice } from '../../utils/print';
+import { predictOverflow } from '../../utils/measure';
+import { PrePrintDialog, type PrePrintResult } from './PrePrintDialog';
 import {
   ArrowLeft,
   Printer,
@@ -23,14 +25,28 @@ import {
   Truck,
 } from 'lucide-react';
 
-interface InvoiceViewProps {
-  order: Order;
-  onBack?: () => void;
-  onViewLabel?: (order: Order) => void;
-}
+/* ------------------------------------------------------------------ */
+/*  Paper size map                                                     */
+/* ------------------------------------------------------------------ */
+
+const PAPER_INFO: Record<
+  InvoicePaper,
+  { w: string; minH: string; pad: string; label: string; hint: string }
+> = {
+  A5:          { w: '148mm',   minH: '210mm',   pad: 'p-5', label: 'A5',  hint: 'Half A4 · Default' },
+  A4:          { w: '210mm',   minH: '297mm',   pad: 'p-8', label: 'A4',  hint: 'Standard office' },
+  A6:          { w: '105mm',   minH: '148mm',   pad: 'p-4', label: 'A6',  hint: 'Quarter A4' },
+  THERMAL_4x6: { w: '101.6mm', minH: '152.4mm', pad: 'p-3', label: '4×6', hint: 'Thermal label' },
+  THERMAL_2:   { w: '50.8mm',  minH: '203.2mm', pad: 'p-2', label: '2"',  hint: 'Narrow receipt' },
+  THERMAL_3:   { w: '76.2mm',  minH: '203.2mm', pad: 'p-3', label: '3"',  hint: 'Receipt roll' },
+};
+
+const ALL_PAPERS: InvoicePaper[] = ['A5', 'A4', 'A6', 'THERMAL_4x6', 'THERMAL_2', 'THERMAL_3'];
+
+const MM_PER_PX = 1 / 3.7795275591;
 
 /* ------------------------------------------------------------------ */
-/*  Small primitives                                                   */
+/*  Primitives                                                         */
 /* ------------------------------------------------------------------ */
 
 const Field: React.FC<{ label: string; value?: string | null; mono?: boolean }> = ({
@@ -71,10 +87,11 @@ const Toggle: React.FC<{
   </label>
 );
 
-/* ------------------------------------------------------------------ */
-/*  Options panel                                                      */
-/* ------------------------------------------------------------------ */
-
+interface InvoiceViewProps {
+  order: Order;
+  onBack?: () => void;
+  onViewLabel?: (order: Order) => void;
+  }
 const OptionsPanel: React.FC<{
   opts: InvoiceOptions;
   setOpts: (o: InvoiceOptions) => void;
@@ -96,7 +113,7 @@ const OptionsPanel: React.FC<{
   return (
     <div className="space-y-4 text-xs">
       {/* Format row */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold mb-1.5">
             Invoice Type
@@ -114,28 +131,6 @@ const OptionsPanel: React.FC<{
                 }`}
               >
                 {m === 'TAX' ? 'Tax Invoice (Tally)' : 'Retail / Cash Memo'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold mb-1.5">
-            Paper
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {(['A4', 'A5'] as InvoicePaper[]).map(p => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => patch({ paper: p })}
-                className={`px-2.5 py-1 text-[11px] font-medium border ${
-                  opts.paper === p
-                    ? 'bg-neutral-900 text-white border-neutral-900'
-                    : 'border-neutral-300 text-neutral-700 hover:bg-neutral-100'
-                }`}
-              >
-                {p}
               </button>
             ))}
           </div>
@@ -164,6 +159,37 @@ const OptionsPanel: React.FC<{
         </div>
       </div>
 
+      {/* Paper size — full width row */}
+      <div>
+        <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold mb-1.5">
+          Paper Size
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {ALL_PAPERS.map(p => {
+            const info = PAPER_INFO[p];
+            const active = opts.paper === p;
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => patch({ paper: p })}
+                className={`px-2.5 py-1 text-[11px] font-medium border text-left ${
+                  active
+                    ? 'bg-neutral-900 text-white border-neutral-900'
+                    : 'border-neutral-300 text-neutral-700 hover:bg-neutral-100'
+                }`}
+                title={info.hint}
+              >
+                <div className="font-semibold">{info.label}</div>
+                <div className={`text-[9px] ${active ? 'text-neutral-300' : 'text-neutral-400'}`}>
+                  {info.hint}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="border-t border-neutral-200" />
 
       {/* Section toggles + editable fields */}
@@ -182,6 +208,7 @@ const OptionsPanel: React.FC<{
               checked={opts.show.hsnSummary}
               onChange={v => patchShow({ hsnSummary: v })}
               label="HSN summary"
+              hint="Shown on B2C too"
             />
             <Toggle
               checked={opts.show.taxWords}
@@ -276,7 +303,7 @@ const OptionsPanel: React.FC<{
         </div>
       </div>
 
-      {/* Hidden items — Tally-style item masking */}
+      {/* Hidden items */}
       {order.items.length > 0 && (
         <>
           <div className="border-t border-neutral-200" />
@@ -314,14 +341,10 @@ const OptionsPanel: React.FC<{
     </div>
   );
 };
-/* ------------------------------------------------------------------ */
-/*  Main component                                                     */
-/* ------------------------------------------------------------------ */
-
 export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewLabel }) => {
   const { settings, products, showToast } = useStore();
 
-  const STORAGE_KEY = 'otbims.invoice.options.v1';
+  const STORAGE_KEY = 'otbims.invoice.options.v2';
 
   const [opts, setOpts] = useState<InvoiceOptions>(() => {
     const base = defaultInvoiceOptions(order, settings);
@@ -344,19 +367,72 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
   );
 
   const [panelOpen, setPanelOpen] = useState(false);
+  const [printProgress, setPrintProgress] = useState('');
+  const invoiceRef = useRef<HTMLDivElement>(null);
 
-  const handlePrint = () => safePrint();
+  const [prePrint, setPrePrint] = useState<{
+    open: boolean;
+    savePdf: boolean;
+    prediction: ReturnType<typeof predictOverflow> | null;
+  }>({ open: false, savePdf: false, prediction: null });
 
-  const handleSavePdf = () => {
-    showToast('In the print dialog, choose "Save as PDF" as the destination', 'info');
-    safePrint();
+  const buildFilename = () => `Invoice-${order.invoiceNo || order.orderNo}.pdf`;
+
+  const runPrint = async (forcePdf: boolean) => {
+    if (!invoiceRef.current) return;
+    setPrintProgress('Preparing…');
+    const result = await printInvoice({
+      element: invoiceRef.current,
+      paper: opts.paper,
+      filename: buildFilename(),
+      onProgress: setPrintProgress,
+      forcePdf,
+    });
+    setPrintProgress('');
+    if (result === 'shared') showToast('PDF sent to share sheet', 'success');
+    else if (result === 'downloaded') showToast('PDF downloaded', 'success');
+    else if (result === 'failed') showToast('Print failed. Try Save PDF.', 'error');
   };
 
-  const isA5 = opts.paper === 'A5';
+  const handlePrint = () => {
+    if (!invoiceRef.current) return;
+    const prediction = predictOverflow(invoiceRef.current, opts.paper);
+    const needsWarning = !prediction.invoiceFits || !prediction.combinedFits;
+    if (needsWarning) {
+      setPrePrint({ open: true, savePdf: false, prediction });
+    } else {
+      runPrint(false);
+    }
+  };
 
-  return (
+  const handleSavePdf = () => {
+    if (!invoiceRef.current) return;
+    const prediction = predictOverflow(invoiceRef.current, opts.paper);
+    const needsWarning = !prediction.invoiceFits;
+    if (needsWarning) {
+      setPrePrint({ open: true, savePdf: true, prediction });
+    } else {
+      runPrint(true);
+    }
+  };
+
+  const onPrePrintClose = (r: PrePrintResult) => {
+    const wasSavePdf = prePrint.savePdf;
+    if (r.action === 'proceed') {
+      setPrePrint({ open: false, savePdf: false, prediction: null });
+      runPrint(wasSavePdf);
+    } else if (r.action === 'changePaper' && r.paper) {
+      setOpts({ ...opts, paper: r.paper });
+      setPrePrint({ open: false, savePdf: false, prediction: null });
+    } else {
+      setPrePrint({ open: false, savePdf: false, prediction: null });
+    }
+  };
+
+  const paper = PAPER_INFO[opts.paper];
+    return (
     <div className="space-y-4">
-      {/* ---------- Toolbar ---------- */}
+      {/* Toolbar */}
       <div className="no-print flex flex-wrap items-center justify-between gap-3 p-3 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
         <div className="flex items-center gap-2">
           {onBack && (
@@ -375,7 +451,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
               {order.invoiceNo || order.orderNo}
             </div>
             <div className="text-[11px] text-neutral-500">
-              {order.customerName} · {order.customerPhone}
+              {order.customerName} · {order.customerPhone} · {paper.label}
             </div>
           </div>
         </div>
@@ -392,11 +468,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
           >
             <Sliders className="w-3.5 h-3.5" />
             Customize
-            {panelOpen ? (
-              <ChevronUp className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5" />
-            )}
+            {panelOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
           </button>
 
           {onViewLabel && (
@@ -414,7 +486,8 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
           <button
             type="button"
             onClick={handlePrint}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-neutral-900 dark:border-white text-neutral-900 dark:text-white text-xs font-bold hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            disabled={!!printProgress}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-neutral-900 dark:border-white text-neutral-900 dark:text-white text-xs font-bold hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60"
           >
             <Printer className="w-3.5 h-3.5" />
             Print
@@ -423,39 +496,40 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
           <button
             type="button"
             onClick={handleSavePdf}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 text-xs font-bold hover:opacity-90"
+            disabled={!!printProgress}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 text-xs font-bold hover:opacity-90 disabled:opacity-60"
           >
             <FileDown className="w-3.5 h-3.5" />
-            Save PDF
+            {printProgress || 'Save PDF'}
           </button>
         </div>
       </div>
 
-      {/* ---------- Customize panel ---------- */}
+      {/* Customize panel */}
       {panelOpen && (
         <div className="no-print p-4 bg-neutral-50 dark:bg-neutral-900/50 border border-neutral-200 dark:border-neutral-800">
           <OptionsPanel opts={opts} setOpts={setOpts} order={order} />
         </div>
       )}
 
-      {/* ---------- Invoice preview ---------- */}
+      {/* Invoice sheet */}
       <div className="flex justify-center p-4 print:p-0">
         <div
-          className={`invoice-sheet bg-white text-neutral-900 shadow-sm print:shadow-none ${
-            isA5 ? 'w-[148mm] min-h-[210mm]' : 'w-[210mm] min-h-[297mm]'
-          } ${isA5 ? 'p-5' : 'p-8'}`}
-          style={{ fontFamily: 'Inter, system-ui, sans-serif' }}
+          ref={invoiceRef}
+          data-paper={opts.paper}
+          className={`invoice-sheet bg-white text-neutral-900 shadow-sm print:shadow-none ${paper.pad}`}
+          style={{
+            fontFamily: 'Inter, system-ui, sans-serif',
+            width: paper.w,
+            minHeight: paper.minH,
+          }}
         >
-          {/* ======= HEADER ======= */}
+          {/* ============ HEADER ============ */}
           <div className="flex items-start justify-between gap-6 pb-3 border-b border-neutral-300">
             <div className="min-w-0">
-              <div className={`font-bold tracking-tight ${isA5 ? 'text-lg' : 'text-xl'}`}>
-                {model.seller.name}
-              </div>
+              <div className="font-bold tracking-tight text-lg">{model.seller.name}</div>
               {model.seller.addressLines.map((l, i) => (
-                <div key={i} className="text-[11px] text-neutral-600 leading-snug">
-                  {l}
-                </div>
+                <div key={i} className="text-[11px] text-neutral-600 leading-snug">{l}</div>
               ))}
               <div className="text-[11px] text-neutral-600 mt-0.5 font-mono">
                 {model.seller.gstin && <>GSTIN: {model.seller.gstin} · </>}
@@ -469,13 +543,8 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
                 </div>
               )}
             </div>
-
             <div className="text-right shrink-0">
-              <div
-                className={`inline-block border border-neutral-900 px-3 py-1 font-bold tracking-[0.2em] uppercase ${
-                  isA5 ? 'text-xs' : 'text-sm'
-                }`}
-              >
+              <div className="inline-block border border-neutral-900 px-3 py-1 font-bold tracking-[0.2em] uppercase text-sm">
                 {model.title}
               </div>
               {model.subtitle && (
@@ -486,49 +555,32 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             </div>
           </div>
 
-          {/* ======= META STRIP ======= */}
+          {/* ============ META STRIP ============ */}
           <div className="grid grid-cols-2 gap-x-6 gap-y-1 py-3 border-b border-neutral-200 text-[11px]">
             <Field label="Invoice No." value={model.invoiceNo} mono />
-            <div className="text-right">
-              <Field label="Dated" value={model.dated} mono />
-            </div>
-            <Field
-              label="Place of Supply"
-              value={`${model.buyer.stateName} (${model.buyer.stateCode})`}
-            />
-            <div className="text-right">
-              <Field label="Reverse Charge" value="No" />
-            </div>
+            <div className="text-right"><Field label="Dated" value={model.dated} mono /></div>
+            <Field label="Place of Supply" value={`${model.buyer.stateName} (${model.buyer.stateCode})`} />
+            <div className="text-right"><Field label="Reverse Charge" value="No" /></div>
             {order.orderNo && order.orderNo !== model.invoiceNo && (
               <Field label="Order Ref." value={order.orderNo} mono />
             )}
             {order.dueDate && (
-              <div className="text-right">
-                <Field label="Due Date" value={order.dueDate} mono />
-              </div>
+              <div className="text-right"><Field label="Due Date" value={order.dueDate} mono /></div>
             )}
           </div>
 
-          {/* ======= PARTIES ======= */}
-          <div
-            className={`grid ${
-              model.consignee ? 'grid-cols-2' : 'grid-cols-1'
-            } gap-6 py-4 border-b border-neutral-200`}
-          >
+          {/* ============ PARTIES ============ */}
+          <div className={`grid ${model.consignee ? 'grid-cols-2' : 'grid-cols-1'} gap-6 py-4 border-b border-neutral-200`}>
             <div>
               <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
                 Bill To
               </div>
               <div className="text-sm font-bold">{model.buyer.name}</div>
               {model.buyer.addressLines.map((l, i) => (
-                <div key={i} className="text-[11px] text-neutral-700 leading-snug">
-                  {l}
-                </div>
+                <div key={i} className="text-[11px] text-neutral-700 leading-snug">{l}</div>
               ))}
               {model.buyer.phone && (
-                <div className="text-[11px] text-neutral-700 font-mono mt-0.5">
-                  Ph: {model.buyer.phone}
-                </div>
+                <div className="text-[11px] text-neutral-700 font-mono mt-0.5">Ph: {model.buyer.phone}</div>
               )}
               {opts.show.buyerGstin && model.buyer.gstin && (
                 <div className="text-[11px] text-neutral-800 font-mono mt-1 font-semibold">
@@ -547,9 +599,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
                 </div>
                 <div className="text-sm font-bold">{model.consignee.name}</div>
                 {model.consignee.addressLines.map((l, i) => (
-                  <div key={i} className="text-[11px] text-neutral-700 leading-snug">
-                    {l}
-                  </div>
+                  <div key={i} className="text-[11px] text-neutral-700 leading-snug">{l}</div>
                 ))}
                 {opts.show.buyerGstin && model.consignee.gstin && (
                   <div className="text-[11px] text-neutral-800 font-mono mt-1 font-semibold">
@@ -563,17 +613,16 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             )}
           </div>
 
-          {/* ======= DISPATCH STRIP ======= */}
+          {/* ============ DISPATCH ============ */}
           {model.dispatch.length > 0 && (
             <div className="grid grid-cols-3 gap-x-4 gap-y-1 py-3 border-b border-neutral-200">
-              {model.dispatch
-                .filter(d => d.value)
-                .map(d => (
-                  <Field key={d.label} label={d.label} value={d.value} />
-                ))}
+              {model.dispatch.filter(d => d.value).map(d => (
+                <Field key={d.label} label={d.label} value={d.value} />
+              ))}
             </div>
           )}
-                    {/* ======= ITEMS TABLE ======= */}
+
+          {/* ============ ITEMS ============ */}
           <div className="pt-3">
             <table className="w-full text-[11px]">
               <thead>
@@ -610,9 +659,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
                       <td className="py-2 text-right text-neutral-600">{r.gstPercent}%</td>
                     )}
                     <td className="py-2 text-right tabular-nums font-semibold">
-                      {fmtMoney(
-                        r.amount + (model.mode === 'TAX' ? (r.amount * r.gstPercent) / 100 : 0)
-                      )}
+                      {fmtMoney(r.amount + (model.mode === 'TAX' ? (r.amount * r.gstPercent) / 100 : 0))}
                     </td>
                   </tr>
                 ))}
@@ -620,7 +667,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             </table>
           </div>
 
-          {/* ======= TOTALS ======= */}
+          {/* ============ TOTALS ============ */}
           <div className="flex justify-end pt-3">
             <div className="w-[70mm] text-[11px]">
               {model.mode === 'TAX' ? (
@@ -652,7 +699,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             </div>
           </div>
 
-          {/* ======= AMOUNT IN WORDS ======= */}
+          {/* ============ AMOUNT IN WORDS ============ */}
           <div className="mt-3 pt-3 border-t border-neutral-200 text-[11px]">
             <span className="text-[9px] uppercase tracking-wider text-neutral-500 font-semibold mr-1.5">
               Amount in words:
@@ -665,7 +712,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             )}
           </div>
 
-          {/* ======= HSN SUMMARY ======= */}
+          {/* ============ HSN SUMMARY (now shown on B2C too) ============ */}
           {opts.show.hsnSummary && model.hsnRows.length > 0 && model.mode === 'TAX' && (
             <div className="mt-4 pt-3 border-t border-neutral-200">
               <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-2">
@@ -700,20 +747,14 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
                       {model.isIntraState ? (
                         <>
                           <td className="py-1.5 text-right text-neutral-600">{h.cgstRate}%</td>
-                          <td className="py-1.5 text-right tabular-nums">
-                            {fmtMoney(h.cgstAmt)}
-                          </td>
+                          <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.cgstAmt)}</td>
                           <td className="py-1.5 text-right text-neutral-600">{h.sgstRate}%</td>
-                          <td className="py-1.5 text-right tabular-nums">
-                            {fmtMoney(h.sgstAmt)}
-                          </td>
+                          <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.sgstAmt)}</td>
                         </>
                       ) : (
                         <>
                           <td className="py-1.5 text-right text-neutral-600">{h.igstRate}%</td>
-                          <td className="py-1.5 text-right tabular-nums">
-                            {fmtMoney(h.igstAmt)}
-                          </td>
+                          <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.igstAmt)}</td>
                         </>
                       )}
                       <td className="py-1.5 text-right tabular-nums font-semibold">
@@ -726,7 +767,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             </div>
           )}
 
-          {/* ======= REMARKS ======= */}
+          {/* ============ REMARKS ============ */}
           {model.remarks && (
             <div className="mt-4 pt-3 border-t border-neutral-200 text-[11px]">
               <span className="text-[9px] uppercase tracking-wider text-neutral-500 font-semibold mr-1.5">
@@ -736,7 +777,7 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             </div>
           )}
 
-          {/* ======= BANK + UPI + DECLARATION ======= */}
+          {/* ============ BANK + DECLARATION ============ */}
           {(opts.show.bank || opts.show.upi || opts.show.declaration) && (
             <div className="mt-4 pt-3 border-t border-neutral-200 grid grid-cols-2 gap-6 text-[10px]">
               {(opts.show.bank || opts.show.upi) && (
@@ -747,27 +788,25 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
                   {(settings as any).bankName && (
                     <div className="text-neutral-700">
                       <span className="text-neutral-500">Bank: </span>
-                      <span className="font-medium text-neutral-900">
-                        {(settings as any).bankName}
-                      </span>
+                      <span className="font-medium text-neutral-900">{(settings as any).bankName}</span>
                     </div>
                   )}
-                  {(settings as any).bankAccount && (
+                  {(settings as any).accountNumber && (
                     <div className="text-neutral-700 font-mono">
                       <span className="text-neutral-500 font-sans">A/c: </span>
-                      {(settings as any).bankAccount}
+                      {(settings as any).accountNumber}
                     </div>
                   )}
-                  {(settings as any).bankIfsc && (
+                  {(settings as any).ifscCode && (
                     <div className="text-neutral-700 font-mono">
                       <span className="text-neutral-500 font-sans">IFSC: </span>
-                      {(settings as any).bankIfsc}
+                      {(settings as any).ifscCode}
                     </div>
                   )}
-                  {(settings as any).bankBranch && (
+                  {(settings as any).branch && (
                     <div className="text-neutral-700">
                       <span className="text-neutral-500">Branch: </span>
-                      {(settings as any).bankBranch}
+                      {(settings as any).branch}
                     </div>
                   )}
                   {opts.show.upi && (settings as any).upiId && (
@@ -788,15 +827,13 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
                   </div>
                   <p className="text-neutral-600 leading-snug">{DEFAULT_DECLARATION}</p>
                   <p className="text-neutral-500 mt-1.5">
-                    Subject to <span className="font-medium">{opts.jurisdiction}</span>{' '}
-                    jurisdiction.
+                    Subject to <span className="font-medium">{opts.jurisdiction}</span> jurisdiction.
                   </p>
                 </div>
               )}
             </div>
           )}
-
-          {/* ======= SIGNATURE ======= */}
+       {/* ============ SIGNATURE ============ */}
           <div className="mt-6 pt-6 grid grid-cols-2 gap-6">
             <div>
               <div className="border-t border-neutral-400 pt-1.5 text-[10px] text-neutral-600">
@@ -805,21 +842,35 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
             </div>
             <div className="text-right">
               <div className="text-[10px] text-neutral-500 mb-6">For</div>
-              <div className="text-[11px] font-semibold text-neutral-900">
-                {model.seller.name}
-              </div>
+              <div className="text-[11px] font-semibold text-neutral-900">{model.seller.name}</div>
               <div className="border-t border-neutral-400 pt-1.5 text-[10px] text-neutral-600 mt-6">
                 Authorised Signatory
               </div>
             </div>
           </div>
 
-          {/* ======= FOOTER ======= */}
+          {/* ============ FOOTER ============ */}
           <div className="mt-4 pt-3 border-t border-neutral-200 text-center text-[9px] text-neutral-400 tracking-wider uppercase">
             This is a computer-generated invoice · {model.invoiceNo}
           </div>
         </div>
       </div>
+
+      {/* Pre-print dialog */}
+      {prePrint.open && prePrint.prediction && (
+        <PrePrintDialog
+          open={true}
+          onClose={onPrePrintClose}
+          paper={opts.paper}
+          invoiceHeightMm={Math.round(prePrint.prediction.invoiceHeightPx * MM_PER_PX * 10) / 10}
+          availableMm={Math.round(prePrint.prediction.availablePx * MM_PER_PX * 10) / 10}
+          overflowMm={prePrint.prediction.overflowMm}
+          invoiceFits={prePrint.prediction.invoiceFits}
+          combinedFits={prePrint.prediction.combinedFits}
+          willMoveLabel={prePrint.prediction.invoiceFits && !prePrint.prediction.combinedFits}
+          onSavePdf={prePrint.savePdf}
+        />
+      )}
     </div>
   );
 };
@@ -831,3 +882,4 @@ const Row: React.FC<{ label: string; value: string }> = ({ label, value }) => (
     <span className="tabular-nums text-neutral-900">{value}</span>
   </div>
 );
+                                                     
