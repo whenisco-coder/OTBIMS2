@@ -10,7 +10,13 @@ import { numberToIndianWords } from './numberToWords';
 import { stateCodeFor } from './addressParser';
 
 export type InvoiceMode = 'TAX' | 'SIMPLE';
-export type InvoicePaper = 'A4' | 'A5';
+export type InvoicePaper =
+  | 'A5'
+  | 'A4'
+  | 'A6'
+  | 'THERMAL_4x6'
+  | 'THERMAL_2'
+  | 'THERMAL_3';
 
 export interface InvoiceOptions {
   mode: InvoiceMode; // TAX = Tally style tax invoice, SIMPLE = retail bill (price includes GST, no tax columns)
