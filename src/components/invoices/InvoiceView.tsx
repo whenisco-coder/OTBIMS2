@@ -16,6 +16,11 @@ import { printInvoice } from '../../utils/print';
 import { predictOverflow } from '../../utils/measure';
 import { PrePrintDialog, type PrePrintResult } from './PrePrintDialog';
 import {
+  CombinedSheet,
+  DEFAULT_COMBINED_CONFIG,
+  type CombinedConfig,
+} from './CombinedSheet';
+import {
   ArrowLeft,
   Printer,
   FileDown,
@@ -42,6 +47,8 @@ const PAPER_INFO: Record<
 };
 
 const ALL_PAPERS: InvoicePaper[] = ['A5', 'A4', 'A6', 'THERMAL_4x6', 'THERMAL_2', 'THERMAL_3'];
+
+const COMBINED_STORAGE_KEY = 'otbims.combined.config.v1';
 
 const MM_PER_PX = 1 / 3.7795275591;
 
@@ -91,7 +98,7 @@ interface InvoiceViewProps {
   order: Order;
   onBack?: () => void;
   onViewLabel?: (order: Order) => void;
-  }
+}
 const OptionsPanel: React.FC<{
   opts: InvoiceOptions;
   setOpts: (o: InvoiceOptions) => void;
@@ -159,7 +166,7 @@ const OptionsPanel: React.FC<{
         </div>
       </div>
 
-      {/* Paper size — full width row */}
+      {/* Paper size */}
       <div>
         <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold mb-1.5">
           Paper Size
@@ -192,71 +199,24 @@ const OptionsPanel: React.FC<{
 
       <div className="border-t border-neutral-200" />
 
-      {/* Section toggles + editable fields */}
+      {/* Section toggles + document fields */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
         <div>
           <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold mb-2">
             Sections to show
           </div>
           <div className="grid grid-cols-2 gap-x-4">
-            <Toggle
-              checked={opts.show.dispatch}
-              onChange={v => patchShow({ dispatch: v })}
-              label="Dispatch & transport"
-            />
-            <Toggle
-              checked={opts.show.hsnSummary}
-              onChange={v => patchShow({ hsnSummary: v })}
-              label="HSN summary"
-              hint="Shown on B2C too"
-            />
-            <Toggle
-              checked={opts.show.taxWords}
-              onChange={v => patchShow({ taxWords: v })}
-              label="Tax in words"
-            />
-            <Toggle
-              checked={opts.show.bank}
-              onChange={v => patchShow({ bank: v })}
-              label="Bank details"
-            />
-            <Toggle
-              checked={opts.show.upi}
-              onChange={v => patchShow({ upi: v })}
-              label="UPI (ID / QR)"
-            />
-            <Toggle
-              checked={opts.show.declaration}
-              onChange={v => patchShow({ declaration: v })}
-              label="Declaration"
-            />
-            <Toggle
-              checked={opts.show.buyerGstin}
-              onChange={v => patchShow({ buyerGstin: v })}
-              label="Buyer GSTIN"
-            />
-            <Toggle
-              checked={opts.show.itemDetails}
-              onChange={v => patchShow({ itemDetails: v })}
-              label="Item detail line"
-              hint="SKU · Brand · Warranty"
-            />
-            <Toggle
-              checked={opts.show.roundOff}
-              onChange={v => patchShow({ roundOff: v })}
-              label="Round off line"
-            />
-            <Toggle
-              checked={opts.show.remarks}
-              onChange={v => patchShow({ remarks: v })}
-              label="Remarks / notes"
-            />
-            <Toggle
-              checked={opts.show.shipTo}
-              onChange={v => patchShow({ shipTo: v })}
-              label="Ship To block"
-              hint="Only if billing ≠ shipping"
-            />
+            <Toggle checked={opts.show.dispatch} onChange={v => patchShow({ dispatch: v })} label="Dispatch & transport" />
+            <Toggle checked={opts.show.hsnSummary} onChange={v => patchShow({ hsnSummary: v })} label="HSN summary" hint="Shown on B2C too" />
+            <Toggle checked={opts.show.taxWords} onChange={v => patchShow({ taxWords: v })} label="Tax in words" />
+            <Toggle checked={opts.show.bank} onChange={v => patchShow({ bank: v })} label="Bank details" />
+            <Toggle checked={opts.show.upi} onChange={v => patchShow({ upi: v })} label="UPI (ID / QR)" />
+            <Toggle checked={opts.show.declaration} onChange={v => patchShow({ declaration: v })} label="Declaration" />
+            <Toggle checked={opts.show.buyerGstin} onChange={v => patchShow({ buyerGstin: v })} label="Buyer GSTIN" />
+            <Toggle checked={opts.show.itemDetails} onChange={v => patchShow({ itemDetails: v })} label="Item detail line" hint="SKU · Brand · Warranty" />
+            <Toggle checked={opts.show.roundOff} onChange={v => patchShow({ roundOff: v })} label="Round off line" />
+            <Toggle checked={opts.show.remarks} onChange={v => patchShow({ remarks: v })} label="Remarks / notes" />
+            <Toggle checked={opts.show.shipTo} onChange={v => patchShow({ shipTo: v })} label="Ship To block" hint="Only if billing ≠ shipping" />
           </div>
         </div>
 
@@ -369,6 +329,22 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
   const [panelOpen, setPanelOpen] = useState(false);
   const [printProgress, setPrintProgress] = useState('');
   const invoiceRef = useRef<HTMLDivElement>(null);
+  const combinedRef = useRef<HTMLDivElement>(null);
+
+  const [viewMode, setViewMode] = useState<'invoice' | 'combined'>('invoice');
+  const [combinedCfg, setCombinedCfg] = useState<CombinedConfig>(() => {
+    try {
+      const raw = localStorage.getItem(COMBINED_STORAGE_KEY);
+      if (raw) return { ...DEFAULT_COMBINED_CONFIG, ...JSON.parse(raw) };
+    } catch {}
+    return DEFAULT_COMBINED_CONFIG;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(COMBINED_STORAGE_KEY, JSON.stringify(combinedCfg));
+    } catch {}
+  }, [combinedCfg]);
 
   const [prePrint, setPrePrint] = useState<{
     open: boolean;
@@ -376,487 +352,578 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
     prediction: ReturnType<typeof predictOverflow> | null;
   }>({ open: false, savePdf: false, prediction: null });
 
-  const buildFilename = () => `Invoice-${order.invoiceNo || order.orderNo}.pdf`;
-
-  const runPrint = async (forcePdf: boolean) => {
-    if (!invoiceRef.current) return;
-    setPrintProgress('Preparing…');
-    const result = await printInvoice({
-      element: invoiceRef.current,
-      paper: opts.paper,
-      filename: buildFilename(),
-      onProgress: setPrintProgress,
-      forcePdf,
-    });
-    setPrintProgress('');
-    if (result === 'shared') showToast('PDF sent to share sheet', 'success');
-    else if (result === 'downloaded') showToast('PDF downloaded', 'success');
-    else if (result === 'failed') showToast('Print failed. Try Save PDF.', 'error');
-  };
-
-  const handlePrint = () => {
-    if (!invoiceRef.current) return;
-    const prediction = predictOverflow(invoiceRef.current, opts.paper);
-    const needsWarning = !prediction.invoiceFits || !prediction.combinedFits;
-    if (needsWarning) {
-      setPrePrint({ open: true, savePdf: false, prediction });
-    } else {
-      runPrint(false);
-    }
-  };
-
-  const handleSavePdf = () => {
-    if (!invoiceRef.current) return;
-    const prediction = predictOverflow(invoiceRef.current, opts.paper);
-    const needsWarning = !prediction.invoiceFits;
-    if (needsWarning) {
-      setPrePrint({ open: true, savePdf: true, prediction });
-    } else {
-      runPrint(true);
-    }
-  };
-
-  const onPrePrintClose = (r: PrePrintResult) => {
-    const wasSavePdf = prePrint.savePdf;
-    if (r.action === 'proceed') {
-      setPrePrint({ open: false, savePdf: false, prediction: null });
-      runPrint(wasSavePdf);
-    } else if (r.action === 'changePaper' && r.paper) {
-      setOpts({ ...opts, paper: r.paper });
-      setPrePrint({ open: false, savePdf: false, prediction: null });
-    } else {
-      setPrePrint({ open: false, savePdf: false, prediction: null });
-    }
-  };
-
   const paper = PAPER_INFO[opts.paper];
-    return (
-    <div className="space-y-4">
-      {/* Toolbar */}
-      <div className="no-print flex flex-wrap items-center justify-between gap-3 p-3 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
-        <div className="flex items-center gap-2">
-          {onBack && (
-            <button
-              onClick={onBack}
-              className="p-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
-            >
-              <ArrowLeft className="w-4 h-4" />
-            </button>
-          )}
-          <span className="px-2 py-0.5 bg-neutral-900 text-white text-[10px] font-mono font-bold tracking-wider">
-            1. INVOICE
-          </span>
-          <div>
-            <div className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-              {order.invoiceNo || order.orderNo}
-            </div>
-            <div className="text-[11px] text-neutral-500">
-              {order.customerName} · {order.customerPhone} · {paper.label}
-            </div>
+
+  const effectiveCourier =
+    order.courierName || settings.savedCouriers[0] || 'Delhivery';
+  const effectiveAwb =
+    order.awbNumber || `AWB${order.orderNo.replace(/\D/g, '')}`;
+
+  const getActiveRef = (): HTMLDivElement | null =>
+    viewMode === 'combined' ? combinedRef.current : invoiceRef.current;
+  const buildFilename = () =>
+  viewMode === 'combined'
+    ? `Invoice-Label-${order.invoiceNo || order.orderNo}.pdf`
+    : `Invoice-${order.invoiceNo || order.orderNo}.pdf`;
+
+const runPrint = async (forcePdf: boolean) => {
+  const el = getActiveRef();
+  if (!el) return;
+  setPrintProgress('Preparing…');
+  const result = await printInvoice({
+    element: el,
+    paper: viewMode === 'combined' ? 'A5' : opts.paper,
+    filename: buildFilename(),
+    onProgress: setPrintProgress,
+    forcePdf,
+  });
+  setPrintProgress('');
+  if (result === 'shared') showToast('PDF sent to share sheet', 'success');
+  else if (result === 'downloaded') showToast('PDF downloaded', 'success');
+  else if (result === 'failed') showToast('Print failed. Try Save PDF.', 'error');
+};
+
+const handlePrint = () => {
+  const el = getActiveRef();
+  if (!el) return;
+  const paperForMeasure = viewMode === 'combined' ? 'A5' : opts.paper;
+  const prediction = predictOverflow(el, paperForMeasure);
+  const needsWarning = !prediction.invoiceFits || !prediction.combinedFits;
+  if (needsWarning) {
+    setPrePrint({ open: true, savePdf: false, prediction });
+  } else {
+    runPrint(false);
+  }
+};
+
+const handleSavePdf = () => {
+  const el = getActiveRef();
+  if (!el) return;
+  const paperForMeasure = viewMode === 'combined' ? 'A5' : opts.paper;
+  const prediction = predictOverflow(el, paperForMeasure);
+  const needsWarning = !prediction.invoiceFits;
+  if (needsWarning) {
+    setPrePrint({ open: true, savePdf: true, prediction });
+  } else {
+    runPrint(true);
+  }
+};
+
+const handlePrintWithLabel = () => {
+  setViewMode('combined');
+  setTimeout(() => handlePrint(), 50);
+};
+
+const onPrePrintClose = (r: PrePrintResult) => {
+  const wasSavePdf = prePrint.savePdf;
+  if (r.action === 'proceed') {
+    setPrePrint({ open: false, savePdf: false, prediction: null });
+    runPrint(wasSavePdf);
+  } else if (r.action === 'changePaper' && r.paper) {
+    setOpts({ ...opts, paper: r.paper });
+    setPrePrint({ open: false, savePdf: false, prediction: null });
+  } else {
+    setPrePrint({ open: false, savePdf: false, prediction: null });
+  }
+};
+  return (
+  <div className="space-y-4">
+    {/* Toolbar */}
+    <div className="no-print flex flex-wrap items-center justify-between gap-3 p-3 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
+      <div className="flex items-center gap-2">
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="p-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+        )}
+        <span className="px-2 py-0.5 bg-neutral-900 text-white text-[10px] font-mono font-bold tracking-wider">
+          1. INVOICE
+        </span>
+        <div>
+          <div className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+            {order.invoiceNo || order.orderNo}
           </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setPanelOpen(v => !v)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 border text-xs font-semibold ${
-              panelOpen
-                ? 'border-neutral-900 bg-neutral-100 dark:bg-neutral-800'
-                : 'border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'
-            }`}
-          >
-            <Sliders className="w-3.5 h-3.5" />
-            Customize
-            {panelOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-          </button>
-
-          {onViewLabel && (
-            <button
-              type="button"
-              onClick={() => onViewLabel(order)}
-              className="flex items-center gap-1.5 px-3 py-1.5 border border-neutral-300 dark:border-neutral-700 text-xs font-semibold hover:bg-neutral-100 dark:hover:bg-neutral-800"
-              title="Next: Shipping Label"
-            >
-              <Truck className="w-3.5 h-3.5 text-amber-500" />
-              <span>2. Label →</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={handlePrint}
-            disabled={!!printProgress}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-neutral-900 dark:border-white text-neutral-900 dark:text-white text-xs font-bold hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            Print
-          </button>
-
-          <button
-            type="button"
-            onClick={handleSavePdf}
-            disabled={!!printProgress}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 text-xs font-bold hover:opacity-90 disabled:opacity-60"
-          >
-            <FileDown className="w-3.5 h-3.5" />
-            {printProgress || 'Save PDF'}
-          </button>
+          <div className="text-[11px] text-neutral-500">
+            {order.customerName} · {order.customerPhone} · {viewMode === 'combined' ? 'A5 Combined' : paper.label}
+          </div>
         </div>
       </div>
 
-      {/* Customize panel */}
-      {panelOpen && (
-        <div className="no-print p-4 bg-neutral-50 dark:bg-neutral-900/50 border border-neutral-200 dark:border-neutral-800">
-          <OptionsPanel opts={opts} setOpts={setOpts} order={order} />
-        </div>
-      )}
-
-      {/* Invoice sheet */}
-      <div className="flex justify-center p-4 print:p-0">
-        <div
-          ref={invoiceRef}
-          data-paper={opts.paper}
-          className={`invoice-sheet bg-white text-neutral-900 shadow-sm print:shadow-none ${paper.pad}`}
-          style={{
-            fontFamily: 'Inter, system-ui, sans-serif',
-            width: paper.w,
-            minHeight: paper.minH,
-          }}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setPanelOpen(v => !v)}
+          className={`flex items-center gap-1.5 px-3 py-1.5 border text-xs font-semibold ${
+            panelOpen
+              ? 'border-neutral-900 bg-neutral-100 dark:bg-neutral-800'
+              : 'border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+          }`}
         >
-          {/* ============ HEADER ============ */}
-          <div className="flex items-start justify-between gap-6 pb-3 border-b border-neutral-300">
-            <div className="min-w-0">
-              <div className="font-bold tracking-tight text-lg">{model.seller.name}</div>
-              {model.seller.addressLines.map((l, i) => (
-                <div key={i} className="text-[11px] text-neutral-600 leading-snug">{l}</div>
-              ))}
-              <div className="text-[11px] text-neutral-600 mt-0.5 font-mono">
-                {model.seller.gstin && <>GSTIN: {model.seller.gstin} · </>}
-                {model.seller.stateName} ({model.seller.stateCode})
-              </div>
-              {(model.seller.phone || model.seller.email) && (
-                <div className="text-[11px] text-neutral-600">
-                  {model.seller.phone}
-                  {model.seller.phone && model.seller.email && ' · '}
-                  {model.seller.email}
-                </div>
-              )}
+          <Sliders className="w-3.5 h-3.5" />
+          Customize
+          {panelOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </button>
+
+        {/* View mode toggle */}
+        <div className="flex items-center border border-neutral-300 dark:border-neutral-700 text-xs">
+          <button
+            type="button"
+            onClick={() => setViewMode('invoice')}
+            className={`px-2.5 py-1.5 font-semibold ${
+              viewMode === 'invoice'
+                ? 'bg-neutral-900 dark:bg-white text-white dark:text-neutral-950'
+                : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+            }`}
+            title="Invoice only"
+          >
+            Invoice
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('combined')}
+            className={`px-2.5 py-1.5 font-semibold border-l border-neutral-300 dark:border-neutral-700 ${
+              viewMode === 'combined'
+                ? 'bg-neutral-900 dark:bg-white text-white dark:text-neutral-950'
+                : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+            }`}
+            title="Invoice + Label on one A5"
+          >
+            + Label
+          </button>
+        </div>
+
+        {viewMode === 'invoice' && (
+          <button
+            type="button"
+            onClick={handlePrintWithLabel}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-amber-500 text-amber-700 dark:text-amber-400 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/30"
+            title="Switch to combined view and print"
+          >
+            <Truck className="w-3.5 h-3.5" />
+            Print with Label
+          </button>
+        )}
+
+        {onViewLabel && (
+          <button
+            type="button"
+            onClick={() => onViewLabel(order)}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-neutral-300 dark:border-neutral-700 text-xs font-semibold hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            title="Go to shipping label screen"
+          >
+            <Truck className="w-3.5 h-3.5 text-amber-500" />
+            <span>2. Label →</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={handlePrint}
+          disabled={!!printProgress}
+          className="flex items-center gap-1.5 px-3 py-1.5 border border-neutral-900 dark:border-white text-neutral-900 dark:text-white text-xs font-bold hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60"
+        >
+          <Printer className="w-3.5 h-3.5" />
+          Print
+        </button>
+
+        <button
+          type="button"
+          onClick={handleSavePdf}
+          disabled={!!printProgress}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 text-xs font-bold hover:opacity-90 disabled:opacity-60"
+        >
+          <FileDown className="w-3.5 h-3.5" />
+          {printProgress || 'Save PDF'}
+        </button>
+      </div>
+    </div>
+
+    {/* Customize panel */}
+    {panelOpen && (
+      <div className="no-print p-4 bg-neutral-50 dark:bg-neutral-900/50 border border-neutral-200 dark:border-neutral-800 space-y-6">
+        <OptionsPanel opts={opts} setOpts={setOpts} order={order} />
+
+        {viewMode === 'combined' && (
+          <div className="pt-4 border-t border-neutral-200">
+            <div className="text-xs font-bold uppercase tracking-wider mb-3">
+              Combined sheet options
             </div>
-            <div className="text-right shrink-0">
-              <div className="inline-block border border-neutral-900 px-3 py-1 font-bold tracking-[0.2em] uppercase text-sm">
-                {model.title}
-              </div>
-              {model.subtitle && (
-                <div className="text-[10px] italic text-neutral-500 mt-1 max-w-[180px] ml-auto">
-                  {model.subtitle}
-                </div>
-              )}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-xs">
+              <Toggle checked={combinedCfg.showCutLine} onChange={v => setCombinedCfg({ ...combinedCfg, showCutLine: v })} label="Cut line" hint="Dashed line between halves" />
+              <Toggle checked={combinedCfg.showSignature} onChange={v => setCombinedCfg({ ...combinedCfg, showSignature: v })} label="Signature block" hint="Rule 46(p)" />
+              <Toggle checked={combinedCfg.showHsnColumn} onChange={v => setCombinedCfg({ ...combinedCfg, showHsnColumn: v })} label="HSN column" hint="In items table" />
+              <Toggle checked={combinedCfg.showBank} onChange={v => setCombinedCfg({ ...combinedCfg, showBank: v })} label="Bank details" />
+              <Toggle checked={combinedCfg.showUpi} onChange={v => setCombinedCfg({ ...combinedCfg, showUpi: v })} label="UPI ID" />
+              <Toggle checked={combinedCfg.showDeclaration} onChange={v => setCombinedCfg({ ...combinedCfg, showDeclaration: v })} label="Declaration" />
+              <Toggle checked={combinedCfg.showRemarks} onChange={v => setCombinedCfg({ ...combinedCfg, showRemarks: v })} label="Remarks" />
+              <Toggle checked={combinedCfg.labelShowPaymentBanner} onChange={v => setCombinedCfg({ ...combinedCfg, labelShowPaymentBanner: v })} label="Label: Payment banner" hint="COD / Prepaid" />
+              <Toggle checked={combinedCfg.labelShowReturnTo} onChange={v => setCombinedCfg({ ...combinedCfg, labelShowReturnTo: v })} label="Label: Return address" hint="Recommended" />
+              <Toggle checked={combinedCfg.labelShowContents} onChange={v => setCombinedCfg({ ...combinedCfg, labelShowContents: v })} label="Label: Contents list" />
+              <Toggle checked={combinedCfg.labelShowBattery} onChange={v => setCombinedCfg({ ...combinedCfg, labelShowBattery: v })} label="Label: Battery warning" />
             </div>
           </div>
-
-          {/* ============ META STRIP ============ */}
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1 py-3 border-b border-neutral-200 text-[11px]">
-            <Field label="Invoice No." value={model.invoiceNo} mono />
-            <div className="text-right"><Field label="Dated" value={model.dated} mono /></div>
-            <Field label="Place of Supply" value={`${model.buyer.stateName} (${model.buyer.stateCode})`} />
-            <div className="text-right"><Field label="Reverse Charge" value="No" /></div>
-            {order.orderNo && order.orderNo !== model.invoiceNo && (
-              <Field label="Order Ref." value={order.orderNo} mono />
-            )}
-            {order.dueDate && (
-              <div className="text-right"><Field label="Due Date" value={order.dueDate} mono /></div>
-            )}
+        )}
+      </div>
+    )}
+    {/* Sheet */}
+<div className="flex justify-center p-4 print:p-0">
+  {viewMode === 'combined' ? (
+    <CombinedSheet
+      sheetRef={combinedRef}
+      order={order}
+      opts={opts}
+      courierName={effectiveCourier}
+      awbNumber={effectiveAwb}
+      config={combinedCfg}
+      hideBarcode={false}
+    />
+  ) : (
+  <div
+    ref={invoiceRef}
+    data-paper={opts.paper}
+    className={`invoice-sheet bg-white text-neutral-900 shadow-sm print:shadow-none ${paper.pad}`}
+    style={{
+      fontFamily: 'Inter, system-ui, sans-serif',
+      width: paper.w,
+      minHeight: paper.minH,
+    }}
+  >
+    {/* HEADER */}
+    <div className="flex items-start justify-between gap-6 pb-3 border-b border-neutral-300">
+      <div className="min-w-0">
+        <div className="font-bold tracking-tight text-lg">{model.seller.name}</div>
+        {model.seller.addressLines.map((l, i) => (
+          <div key={i} className="text-[11px] text-neutral-600 leading-snug">{l}</div>
+        ))}
+        <div className="text-[11px] text-neutral-600 mt-0.5 font-mono">
+          {model.seller.gstin && <>GSTIN: {model.seller.gstin} · </>}
+          {model.seller.stateName} ({model.seller.stateCode})
+        </div>
+        {(model.seller.phone || model.seller.email) && (
+          <div className="text-[11px] text-neutral-600">
+            {model.seller.phone}
+            {model.seller.phone && model.seller.email && ' · '}
+            {model.seller.email}
           </div>
-
-          {/* ============ PARTIES ============ */}
-          <div className={`grid ${model.consignee ? 'grid-cols-2' : 'grid-cols-1'} gap-6 py-4 border-b border-neutral-200`}>
-            <div>
-              <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
-                Bill To
-              </div>
-              <div className="text-sm font-bold">{model.buyer.name}</div>
-              {model.buyer.addressLines.map((l, i) => (
-                <div key={i} className="text-[11px] text-neutral-700 leading-snug">{l}</div>
-              ))}
-              {model.buyer.phone && (
-                <div className="text-[11px] text-neutral-700 font-mono mt-0.5">Ph: {model.buyer.phone}</div>
-              )}
-              {opts.show.buyerGstin && model.buyer.gstin && (
-                <div className="text-[11px] text-neutral-800 font-mono mt-1 font-semibold">
-                  GSTIN: {model.buyer.gstin}
-                </div>
-              )}
-              <div className="text-[11px] text-neutral-700 mt-0.5">
-                State: {model.buyer.stateName} ({model.buyer.stateCode})
-              </div>
-            </div>
-
-            {model.consignee && (
-              <div>
-                <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
-                  Ship To
-                </div>
-                <div className="text-sm font-bold">{model.consignee.name}</div>
-                {model.consignee.addressLines.map((l, i) => (
-                  <div key={i} className="text-[11px] text-neutral-700 leading-snug">{l}</div>
-                ))}
-                {opts.show.buyerGstin && model.consignee.gstin && (
-                  <div className="text-[11px] text-neutral-800 font-mono mt-1 font-semibold">
-                    GSTIN: {model.consignee.gstin}
-                  </div>
-                )}
-                <div className="text-[11px] text-neutral-700 mt-0.5">
-                  State: {model.consignee.stateName} ({model.consignee.stateCode})
-                </div>
-              </div>
-            )}
+        )}
+      </div>
+      <div className="text-right shrink-0">
+        <div className="inline-block border border-neutral-900 px-3 py-1 font-bold tracking-[0.2em] uppercase text-sm">
+          {model.title}
+        </div>
+        {model.subtitle && (
+          <div className="text-[10px] italic text-neutral-500 mt-1 max-w-[180px] ml-auto">
+            {model.subtitle}
           </div>
+        )}
+      </div>
+    </div>
 
-          {/* ============ DISPATCH ============ */}
-          {model.dispatch.length > 0 && (
-            <div className="grid grid-cols-3 gap-x-4 gap-y-1 py-3 border-b border-neutral-200">
-              {model.dispatch.filter(d => d.value).map(d => (
-                <Field key={d.label} label={d.label} value={d.value} />
-              ))}
+    {/* META STRIP */}
+    <div className="grid grid-cols-2 gap-x-6 gap-y-1 py-3 border-b border-neutral-200 text-[11px]">
+      <Field label="Invoice No." value={model.invoiceNo} mono />
+      <div className="text-right"><Field label="Dated" value={model.dated} mono /></div>
+      <Field label="Place of Supply" value={`${model.buyer.stateName} (${model.buyer.stateCode})`} />
+      <div className="text-right"><Field label="Reverse Charge" value="No" /></div>
+      {order.orderNo && order.orderNo !== model.invoiceNo && (
+        <Field label="Order Ref." value={order.orderNo} mono />
+      )}
+      {order.dueDate && (
+        <div className="text-right"><Field label="Due Date" value={order.dueDate} mono /></div>
+      )}
+    </div>
+
+    {/* PARTIES */}
+    <div className={`grid ${model.consignee ? 'grid-cols-2' : 'grid-cols-1'} gap-6 py-4 border-b border-neutral-200`}>
+      <div>
+        <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
+          Bill To
+        </div>
+        <div className="text-sm font-bold">{model.buyer.name}</div>
+        {model.buyer.addressLines.map((l, i) => (
+          <div key={i} className="text-[11px] text-neutral-700 leading-snug">{l}</div>
+        ))}
+        {model.buyer.phone && (
+          <div className="text-[11px] text-neutral-700 font-mono mt-0.5">Ph: {model.buyer.phone}</div>
+        )}
+        {opts.show.buyerGstin && model.buyer.gstin && (
+          <div className="text-[11px] text-neutral-800 font-mono mt-1 font-semibold">
+            GSTIN: {model.buyer.gstin}
+          </div>
+        )}
+        <div className="text-[11px] text-neutral-700 mt-0.5">
+          State: {model.buyer.stateName} ({model.buyer.stateCode})
+        </div>
+      </div>
+
+      {model.consignee && (
+        <div>
+          <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
+            Ship To
+          </div>
+          <div className="text-sm font-bold">{model.consignee.name}</div>
+          {model.consignee.addressLines.map((l, i) => (
+            <div key={i} className="text-[11px] text-neutral-700 leading-snug">{l}</div>
+          ))}
+          {opts.show.buyerGstin && model.consignee.gstin && (
+            <div className="text-[11px] text-neutral-800 font-mono mt-1 font-semibold">
+              GSTIN: {model.consignee.gstin}
             </div>
           )}
-
-          {/* ============ ITEMS ============ */}
-          <div className="pt-3">
-            <table className="w-full text-[11px]">
-              <thead>
-                <tr className="border-b border-neutral-900 text-[9px] uppercase tracking-wider text-neutral-600">
-                  <th className="text-left py-2 font-semibold w-6">#</th>
-                  <th className="text-left py-2 font-semibold">Description</th>
-                  <th className="text-left py-2 font-semibold w-14">HSN</th>
-                  <th className="text-right py-2 font-semibold w-10">Qty</th>
-                  <th className="text-right py-2 font-semibold w-16">Rate</th>
-                  <th className="text-right py-2 font-semibold w-20">Taxable</th>
-                  {model.mode === 'TAX' && (
-                    <th className="text-right py-2 font-semibold w-12">GST %</th>
-                  )}
-                  <th className="text-right py-2 font-semibold w-20">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {model.rows.map(r => (
-                  <tr key={r.sl} className="border-b border-neutral-100 align-top">
-                    <td className="py-2 text-neutral-500">{r.sl}</td>
-                    <td className="py-2 pr-2">
-                      <div className="font-medium text-neutral-900">{r.name}</div>
-                      {opts.show.itemDetails && r.detail && (
-                        <div className="text-[10px] text-neutral-500 mt-0.5">{r.detail}</div>
-                      )}
-                    </td>
-                    <td className="py-2 font-mono text-neutral-600">{r.hsn}</td>
-                    <td className="py-2 text-right tabular-nums">
-                      {r.qty} <span className="text-neutral-400">{r.unit}</span>
-                    </td>
-                    <td className="py-2 text-right tabular-nums">{fmtMoney(r.rate)}</td>
-                    <td className="py-2 text-right tabular-nums">{fmtMoney(r.amount)}</td>
-                    {model.mode === 'TAX' && (
-                      <td className="py-2 text-right text-neutral-600">{r.gstPercent}%</td>
-                    )}
-                    <td className="py-2 text-right tabular-nums font-semibold">
-                      {fmtMoney(r.amount + (model.mode === 'TAX' ? (r.amount * r.gstPercent) / 100 : 0))}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="text-[11px] text-neutral-700 mt-0.5">
+            State: {model.consignee.stateName} ({model.consignee.stateCode})
           </div>
+        </div>
+      )}
+    </div>
 
-          {/* ============ TOTALS ============ */}
-          <div className="flex justify-end pt-3">
-            <div className="w-[70mm] text-[11px]">
-              {model.mode === 'TAX' ? (
+    {/* DISPATCH */}
+    {model.dispatch.length > 0 && (
+      <div className="grid grid-cols-3 gap-x-4 gap-y-1 py-3 border-b border-neutral-200">
+        {model.dispatch.filter(d => d.value).map(d => (
+          <Field key={d.label} label={d.label} value={d.value} />
+        ))}
+      </div>
+    )}
+
+    {/* ITEMS TABLE */}
+    <div className="pt-3">
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="border-b border-neutral-900 text-[9px] uppercase tracking-wider text-neutral-600">
+            <th className="text-left py-2 font-semibold w-6">#</th>
+            <th className="text-left py-2 font-semibold">Description</th>
+            <th className="text-left py-2 font-semibold w-14">HSN</th>
+            <th className="text-right py-2 font-semibold w-10">Qty</th>
+            <th className="text-right py-2 font-semibold w-16">Rate</th>
+            <th className="text-right py-2 font-semibold w-20">Taxable</th>
+            {model.mode === 'TAX' && (
+              <th className="text-right py-2 font-semibold w-12">GST %</th>
+            )}
+            <th className="text-right py-2 font-semibold w-20">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {model.rows.map(r => (
+            <tr key={r.sl} className="border-b border-neutral-100 align-top">
+              <td className="py-2 text-neutral-500">{r.sl}</td>
+              <td className="py-2 pr-2">
+                <div className="font-medium text-neutral-900">{r.name}</div>
+                {opts.show.itemDetails && r.detail && (
+                  <div className="text-[10px] text-neutral-500 mt-0.5">{r.detail}</div>
+                )}
+              </td>
+              <td className="py-2 font-mono text-neutral-600">{r.hsn}</td>
+              <td className="py-2 text-right tabular-nums">
+                {r.qty} <span className="text-neutral-400">{r.unit}</span>
+              </td>
+              <td className="py-2 text-right tabular-nums">{fmtMoney(r.rate)}</td>
+              <td className="py-2 text-right tabular-nums">{fmtMoney(r.amount)}</td>
+              {model.mode === 'TAX' && (
+                <td className="py-2 text-right text-neutral-600">{r.gstPercent}%</td>
+              )}
+              <td className="py-2 text-right tabular-nums font-semibold">
+                {fmtMoney(r.amount + (model.mode === 'TAX' ? (r.amount * r.gstPercent) / 100 : 0))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+       {/* TOTALS */}
+    <div className="flex justify-end pt-3">
+      <div className="w-[70mm] text-[11px]">
+        {model.mode === 'TAX' ? (
+          <>
+            <Row label="Taxable Value" value={fmtMoney(model.taxableTotal)} />
+            {model.taxLines.map(l => (
+              <Row key={l.label} label={l.label} value={fmtMoney(l.amount)} />
+            ))}
+            {opts.show.roundOff && Math.abs(model.roundOff) > 0.004 && (
+              <Row label="Round Off" value={fmtMoney(model.roundOff)} />
+            )}
+            <div className="flex justify-between border-t border-neutral-900 mt-1.5 pt-1.5 text-sm font-bold">
+              <span>Grand Total</span>
+              <span className="tabular-nums">₹ {fmtMoney(model.grandTotal)}</span>
+            </div>
+          </>
+        ) : (
+          <>
+            <Row label="Sub Total" value={fmtMoney(model.rawTotal)} />
+            {opts.show.roundOff && Math.abs(model.roundOff) > 0.004 && (
+              <Row label="Round Off" value={fmtMoney(model.roundOff)} />
+            )}
+            <div className="flex justify-between border-t border-neutral-900 mt-1.5 pt-1.5 text-sm font-bold">
+              <span>Grand Total</span>
+              <span className="tabular-nums">₹ {fmtMoney(model.grandTotal)}</span>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+
+    {/* AMOUNT IN WORDS */}
+    <div className="mt-3 pt-3 border-t border-neutral-200 text-[11px]">
+      <span className="text-[9px] uppercase tracking-wider text-neutral-500 font-semibold mr-1.5">
+        Amount in words:
+      </span>
+      <span className="font-medium text-neutral-900">{model.amountWords} Only</span>
+      {opts.show.taxWords && model.mode === 'TAX' && model.taxTotal > 0 && (
+        <div className="mt-1 text-[10px] text-neutral-600 italic">
+          Total tax: {model.taxWords} Only
+        </div>
+      )}
+    </div>
+
+    {/* HSN SUMMARY */}
+    {opts.show.hsnSummary && model.hsnRows.length > 0 && model.mode === 'TAX' && (
+      <div className="mt-4 pt-3 border-t border-neutral-200">
+        <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-2">
+          HSN / SAC Summary
+        </div>
+        <table className="w-full text-[10px]">
+          <thead>
+            <tr className="border-b border-neutral-300 text-[9px] uppercase tracking-wider text-neutral-500">
+              <th className="text-left py-1.5 font-semibold">HSN</th>
+              <th className="text-right py-1.5 font-semibold">Taxable</th>
+              {model.isIntraState ? (
                 <>
-                  <Row label="Taxable Value" value={fmtMoney(model.taxableTotal)} />
-                  {model.taxLines.map(l => (
-                    <Row key={l.label} label={l.label} value={fmtMoney(l.amount)} />
-                  ))}
-                  {opts.show.roundOff && Math.abs(model.roundOff) > 0.004 && (
-                    <Row label="Round Off" value={fmtMoney(model.roundOff)} />
-                  )}
-                  <div className="flex justify-between border-t border-neutral-900 mt-1.5 pt-1.5 text-sm font-bold">
-                    <span>Grand Total</span>
-                    <span className="tabular-nums">₹ {fmtMoney(model.grandTotal)}</span>
-                  </div>
+                  <th className="text-right py-1.5 font-semibold">CGST %</th>
+                  <th className="text-right py-1.5 font-semibold">CGST ₹</th>
+                  <th className="text-right py-1.5 font-semibold">SGST %</th>
+                  <th className="text-right py-1.5 font-semibold">SGST ₹</th>
                 </>
               ) : (
                 <>
-                  <Row label="Sub Total" value={fmtMoney(model.rawTotal)} />
-                  {opts.show.roundOff && Math.abs(model.roundOff) > 0.004 && (
-                    <Row label="Round Off" value={fmtMoney(model.roundOff)} />
-                  )}
-                  <div className="flex justify-between border-t border-neutral-900 mt-1.5 pt-1.5 text-sm font-bold">
-                    <span>Grand Total</span>
-                    <span className="tabular-nums">₹ {fmtMoney(model.grandTotal)}</span>
-                  </div>
+                  <th className="text-right py-1.5 font-semibold">IGST %</th>
+                  <th className="text-right py-1.5 font-semibold">IGST ₹</th>
                 </>
               )}
-            </div>
-          </div>
+              <th className="text-right py-1.5 font-semibold">Total Tax</th>
+            </tr>
+          </thead>
+          <tbody>
+            {model.hsnRows.map((h, i) => (
+              <tr key={i} className="border-b border-neutral-100">
+                <td className="py-1.5 font-mono">{h.hsn}</td>
+                <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.taxable)}</td>
+                {model.isIntraState ? (
+                  <>
+                    <td className="py-1.5 text-right text-neutral-600">{h.cgstRate}%</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.cgstAmt)}</td>
+                    <td className="py-1.5 text-right text-neutral-600">{h.sgstRate}%</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.sgstAmt)}</td>
+                  </>
+                ) : (
+                  <>
+                    <td className="py-1.5 text-right text-neutral-600">{h.igstRate}%</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.igstAmt)}</td>
+                  </>
+                )}
+                <td className="py-1.5 text-right tabular-nums font-semibold">
+                  {fmtMoney(h.totalTax)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
 
-          {/* ============ AMOUNT IN WORDS ============ */}
-          <div className="mt-3 pt-3 border-t border-neutral-200 text-[11px]">
-            <span className="text-[9px] uppercase tracking-wider text-neutral-500 font-semibold mr-1.5">
-              Amount in words:
-            </span>
-            <span className="font-medium text-neutral-900">{model.amountWords} Only</span>
-            {opts.show.taxWords && model.mode === 'TAX' && model.taxTotal > 0 && (
-              <div className="mt-1 text-[10px] text-neutral-600 italic">
-                Total tax: {model.taxWords} Only
+    {/* REMARKS */}
+    {model.remarks && (
+      <div className="mt-4 pt-3 border-t border-neutral-200 text-[11px]">
+        <span className="text-[9px] uppercase tracking-wider text-neutral-500 font-semibold mr-1.5">
+          Remarks:
+        </span>
+        <span className="text-neutral-700">{model.remarks}</span>
+      </div>
+    )}
+
+    {/* BANK + DECLARATION */}
+    {(opts.show.bank || opts.show.upi || opts.show.declaration) && (
+      <div className="mt-4 pt-3 border-t border-neutral-200 grid grid-cols-2 gap-6 text-[10px]">
+        {(opts.show.bank || opts.show.upi) && (
+          <div>
+            <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
+              Bank Details
+            </div>
+            {(settings as any).bankName && (
+              <div className="text-neutral-700">
+                <span className="text-neutral-500">Bank: </span>
+                <span className="font-medium text-neutral-900">{(settings as any).bankName}</span>
+              </div>
+            )}
+            {(settings as any).accountNumber && (
+              <div className="text-neutral-700 font-mono">
+                <span className="text-neutral-500 font-sans">A/c: </span>
+                {(settings as any).accountNumber}
+              </div>
+            )}
+            {(settings as any).ifscCode && (
+              <div className="text-neutral-700 font-mono">
+                <span className="text-neutral-500 font-sans">IFSC: </span>
+                {(settings as any).ifscCode}
+              </div>
+            )}
+            {(settings as any).branch && (
+              <div className="text-neutral-700">
+                <span className="text-neutral-500">Branch: </span>
+                {(settings as any).branch}
+              </div>
+            )}
+            {opts.show.upi && (settings as any).upiId && (
+              <div className="mt-1.5 text-neutral-700">
+                <span className="text-neutral-500">UPI: </span>
+                <span className="font-mono font-medium text-neutral-900">
+                  {(settings as any).upiId}
+                </span>
               </div>
             )}
           </div>
+        )}
 
-          {/* ============ HSN SUMMARY (now shown on B2C too) ============ */}
-          {opts.show.hsnSummary && model.hsnRows.length > 0 && model.mode === 'TAX' && (
-            <div className="mt-4 pt-3 border-t border-neutral-200">
-              <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-2">
-                HSN / SAC Summary
-              </div>
-              <table className="w-full text-[10px]">
-                <thead>
-                  <tr className="border-b border-neutral-300 text-[9px] uppercase tracking-wider text-neutral-500">
-                    <th className="text-left py-1.5 font-semibold">HSN</th>
-                    <th className="text-right py-1.5 font-semibold">Taxable</th>
-                    {model.isIntraState ? (
-                      <>
-                        <th className="text-right py-1.5 font-semibold">CGST %</th>
-                        <th className="text-right py-1.5 font-semibold">CGST ₹</th>
-                        <th className="text-right py-1.5 font-semibold">SGST %</th>
-                        <th className="text-right py-1.5 font-semibold">SGST ₹</th>
-                      </>
-                    ) : (
-                      <>
-                        <th className="text-right py-1.5 font-semibold">IGST %</th>
-                        <th className="text-right py-1.5 font-semibold">IGST ₹</th>
-                      </>
-                    )}
-                    <th className="text-right py-1.5 font-semibold">Total Tax</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {model.hsnRows.map((h, i) => (
-                    <tr key={i} className="border-b border-neutral-100">
-                      <td className="py-1.5 font-mono">{h.hsn}</td>
-                      <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.taxable)}</td>
-                      {model.isIntraState ? (
-                        <>
-                          <td className="py-1.5 text-right text-neutral-600">{h.cgstRate}%</td>
-                          <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.cgstAmt)}</td>
-                          <td className="py-1.5 text-right text-neutral-600">{h.sgstRate}%</td>
-                          <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.sgstAmt)}</td>
-                        </>
-                      ) : (
-                        <>
-                          <td className="py-1.5 text-right text-neutral-600">{h.igstRate}%</td>
-                          <td className="py-1.5 text-right tabular-nums">{fmtMoney(h.igstAmt)}</td>
-                        </>
-                      )}
-                      <td className="py-1.5 text-right tabular-nums font-semibold">
-                        {fmtMoney(h.totalTax)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        {opts.show.declaration && (
+          <div>
+            <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
+              Declaration
             </div>
-          )}
-
-          {/* ============ REMARKS ============ */}
-          {model.remarks && (
-            <div className="mt-4 pt-3 border-t border-neutral-200 text-[11px]">
-              <span className="text-[9px] uppercase tracking-wider text-neutral-500 font-semibold mr-1.5">
-                Remarks:
-              </span>
-              <span className="text-neutral-700">{model.remarks}</span>
-            </div>
-          )}
-
-          {/* ============ BANK + DECLARATION ============ */}
-          {(opts.show.bank || opts.show.upi || opts.show.declaration) && (
-            <div className="mt-4 pt-3 border-t border-neutral-200 grid grid-cols-2 gap-6 text-[10px]">
-              {(opts.show.bank || opts.show.upi) && (
-                <div>
-                  <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
-                    Bank Details
-                  </div>
-                  {(settings as any).bankName && (
-                    <div className="text-neutral-700">
-                      <span className="text-neutral-500">Bank: </span>
-                      <span className="font-medium text-neutral-900">{(settings as any).bankName}</span>
-                    </div>
-                  )}
-                  {(settings as any).accountNumber && (
-                    <div className="text-neutral-700 font-mono">
-                      <span className="text-neutral-500 font-sans">A/c: </span>
-                      {(settings as any).accountNumber}
-                    </div>
-                  )}
-                  {(settings as any).ifscCode && (
-                    <div className="text-neutral-700 font-mono">
-                      <span className="text-neutral-500 font-sans">IFSC: </span>
-                      {(settings as any).ifscCode}
-                    </div>
-                  )}
-                  {(settings as any).branch && (
-                    <div className="text-neutral-700">
-                      <span className="text-neutral-500">Branch: </span>
-                      {(settings as any).branch}
-                    </div>
-                  )}
-                  {opts.show.upi && (settings as any).upiId && (
-                    <div className="mt-1.5 text-neutral-700">
-                      <span className="text-neutral-500">UPI: </span>
-                      <span className="font-mono font-medium text-neutral-900">
-                        {(settings as any).upiId}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {opts.show.declaration && (
-                <div>
-                  <div className="text-[9px] uppercase tracking-[0.15em] text-neutral-500 font-semibold mb-1.5">
-                    Declaration
-                  </div>
-                  <p className="text-neutral-600 leading-snug">{DEFAULT_DECLARATION}</p>
-                  <p className="text-neutral-500 mt-1.5">
-                    Subject to <span className="font-medium">{opts.jurisdiction}</span> jurisdiction.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-       {/* ============ SIGNATURE ============ */}
-          <div className="mt-6 pt-6 grid grid-cols-2 gap-6">
-            <div>
-              <div className="border-t border-neutral-400 pt-1.5 text-[10px] text-neutral-600">
-                Customer Signature
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-[10px] text-neutral-500 mb-6">For</div>
-              <div className="text-[11px] font-semibold text-neutral-900">{model.seller.name}</div>
-              <div className="border-t border-neutral-400 pt-1.5 text-[10px] text-neutral-600 mt-6">
-                Authorised Signatory
-              </div>
-            </div>
+            <p className="text-neutral-600 leading-snug">{DEFAULT_DECLARATION}</p>
+            <p className="text-neutral-500 mt-1.5">
+              Subject to <span className="font-medium">{opts.jurisdiction}</span> jurisdiction.
+            </p>
           </div>
+        )}
+      </div>
+    )}
 
-          {/* ============ FOOTER ============ */}
-          <div className="mt-4 pt-3 border-t border-neutral-200 text-center text-[9px] text-neutral-400 tracking-wider uppercase">
-            This is a computer-generated invoice · {model.invoiceNo}
-          </div>
+    {/* SIGNATURE */}
+    <div className="mt-6 pt-6 grid grid-cols-2 gap-6">
+      <div>
+        <div className="border-t border-neutral-400 pt-1.5 text-[10px] text-neutral-600">
+          Customer Signature
         </div>
       </div>
+      <div className="text-right">
+        <div className="text-[10px] text-neutral-500 mb-6">For</div>
+        <div className="text-[11px] font-semibold text-neutral-900">{model.seller.name}</div>
+        <div className="border-t border-neutral-400 pt-1.5 text-[10px] text-neutral-600 mt-6">
+          Authorised Signatory
+        </div>
+      </div>
+    </div>
 
-      {/* Pre-print dialog */}
+    {/* FOOTER */}
+    <div className="mt-4 pt-3 border-t border-neutral-200 text-center text-[9px] text-neutral-400 tracking-wider uppercase">
+      This is a computer-generated invoice · {model.invoiceNo}
+    </div>
+  </div>
+  )}
+</div>
+          {/* Pre-print dialog */}
       {prePrint.open && prePrint.prediction && (
         <PrePrintDialog
           open={true}
@@ -882,4 +949,3 @@ const Row: React.FC<{ label: string; value: string }> = ({ label, value }) => (
     <span className="tabular-nums text-neutral-900">{value}</span>
   </div>
 );
-                                                     
