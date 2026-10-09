@@ -381,9 +381,10 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
       : `Invoice-${order.invoiceNo || order.orderNo}.pdf`;
 
   const runPrint = async (forcePdf: boolean) => {
-    const el = getActiveRef();
-    if (!el) return;
-    setPrintProgress('Preparing…');
+  const el = getActiveRef();
+  if (!el) return;
+  setPrintProgress('Preparing…');
+  try {
     const result = await printInvoice({
       element: el,
       paper: viewMode === 'combined' ? 'A5' : opts.paper,
@@ -394,9 +395,12 @@ export const InvoiceView: React.FC<InvoiceViewProps> = ({ order, onBack, onViewL
     setPrintProgress('');
     if (result === 'shared') showToast('PDF sent to share sheet', 'success');
     else if (result === 'downloaded') showToast('PDF downloaded', 'success');
-    else if (result === 'failed') showToast('Print failed. Try Save PDF.', 'error');
-  };
-
+    else if (result === 'failed') showToast('Print failed.', 'error');
+  } catch (err: any) {
+    setPrintProgress('');
+    showToast(err?.message || 'PDF generation failed', 'error');
+  }
+};
   const handlePrint = () => {
     const el = getActiveRef();
     if (!el) return;
