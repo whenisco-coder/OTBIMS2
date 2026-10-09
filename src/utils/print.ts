@@ -29,6 +29,15 @@ export function paperToPageCSS(paper: InvoicePaper): string {
   }
 }
 
+/** Paper height in CSS pixels (96dpi), minus 6mm margins top and bottom. */
+function paperContentHeightPx(paper: InvoicePaper): number {
+  const mmH: Record<InvoicePaper, number> = {
+    A4: 297, A5: 210, A6: 148,
+    THERMAL_4x6: 152.4, THERMAL_2: 203.2, THERMAL_3: 203.2,
+  };
+  return (mmH[paper] - 12) * 3.7795275591;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Mobile detection                                                   */
 /* ------------------------------------------------------------------ */
@@ -79,7 +88,7 @@ export async function saveAndShareFile(
   return 'downloaded';
 }
 /* ------------------------------------------------------------------ */
-/*  PDF cache (IndexedDB) — reprints are instant                       */
+/*  PDF cache (IndexedDB)                                              */
 /* ------------------------------------------------------------------ */
 
 const DB_NAME = 'otbims-invoice-cache';
@@ -117,12 +126,9 @@ async function cacheSet(key: string, value: string): Promise<void> {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
-  } catch {
-    /* cache write failure is not fatal */
-  }
+  } catch {}
 }
 
-/** Build a short cache key from the things that affect output. */
 export function buildCacheKey(parts: {
   orderId: string;
   invoiceNo?: string;
@@ -147,6 +153,22 @@ export function clearPdfCache(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+/** Wrap a promise with a timeout. Rejects with a friendly error. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(`${label} took longer than ${Math.round(ms / 1000)}s. Try again or use a smaller paper size.`));
+    }, ms);
+    promise.then(
+      v => { clearTimeout(t); resolve(v); },
+      e => { clearTimeout(t); reject(e); }
+    );
+  });
+  }
+/* ------------------------------------------------------------------ */
 /*  Main print entry point                                             */
 /* ------------------------------------------------------------------ */
 
@@ -158,16 +180,41 @@ export interface PrintOptions {
   forcePdf?: boolean;
   cacheKey?: string;
   skipCache?: boolean;
+  /** Max ms to wait for PDF generation. Default 25000. */
+  timeoutMs?: number;
 }
 
 export type PrintResult = 'printed' | 'shared' | 'downloaded' | 'failed' | 'cancelled';
 
 export async function printInvoice(opts: PrintOptions): Promise<PrintResult> {
-  const { element, paper, filename, onProgress, forcePdf, cacheKey, skipCache } = opts;
+  const {
+    element,
+    paper,
+    filename,
+    onProgress,
+    forcePdf,
+    cacheKey,
+    skipCache,
+    timeoutMs = 25000,
+  } = opts;
 
   /* ---------- Mobile (or forced PDF): build a PDF and share ---------- */
   if (forcePdf || isMobileLike()) {
     try {
+      // Guard: refuse if the element is wildly taller than the paper.
+      // Prevents the browser from hanging on oversized content.
+      const elementH = element.getBoundingClientRect().height;
+      const availableH = paperContentHeightPx(paper);
+      const overflowRatio = elementH / availableH;
+
+      if (overflowRatio > 1.3) {
+        onProgress?.('');
+        throw new Error(
+          `Content is ${Math.round((overflowRatio - 1) * 100)}% too tall for ${paper}. ` +
+          `Switch to a larger paper size (A4) or a denser template (Compact).`
+        );
+      }
+
       let dataUri: string | null = null;
 
       if (!skipCache && cacheKey) {
@@ -177,13 +224,24 @@ export async function printInvoice(opts: PrintOptions): Promise<PrintResult> {
 
       if (!dataUri) {
         onProgress?.('Generating PDF…');
-        dataUri = await html2pdf()
+
+        const mobile = isMobileLike();
+        // Mobile: scale 1 (fast). Desktop: scale 1.5 (crisper).
+        const scale = mobile ? 1 : 1.5;
+
+        const pdfPromise = html2pdf()
           .from(element)
           .set({
             margin: 0.3,
             filename,
-            image: { type: 'jpeg' as const, quality: 0.98 },
-            html2canvas: { scale: 1.5, useCORS: true, logging: false },
+            image: { type: 'jpeg' as const, quality: 0.92 },
+            html2canvas: {
+              scale,
+              useCORS: true,
+              logging: false,
+              imageTimeout: 0,       // don't block on slow images
+              removeContainer: true,
+            },
             jsPDF: {
               unit: 'in',
               format: paperToJsPDFFormat(paper),
@@ -192,6 +250,8 @@ export async function printInvoice(opts: PrintOptions): Promise<PrintResult> {
           })
           .outputPdf('datauristring');
 
+        dataUri = await withTimeout(pdfPromise as Promise<string>, timeoutMs, 'PDF generation');
+
         if (cacheKey) await cacheSet(cacheKey, dataUri);
       }
 
@@ -199,10 +259,11 @@ export async function printInvoice(opts: PrintOptions): Promise<PrintResult> {
       const how = await saveAndShareFile(filename, dataUri, 'application/pdf');
       onProgress?.('');
       return how;
-    } catch (err) {
+    } catch (err: any) {
       console.error('PDF generation failed', err);
       onProgress?.('');
-      /* fall through to window.print() as last resort */
+      // Bubble up a friendly message; the caller shows it as a toast
+      throw err instanceof Error ? err : new Error('PDF generation failed');
     }
   }
 
@@ -224,20 +285,15 @@ export async function printInvoice(opts: PrintOptions): Promise<PrintResult> {
     return 'failed';
   }
 }
+
 /* ------------------------------------------------------------------ */
-/*  Backward-compat: simple page print for non-invoice views          */
-/*  (Products, Reports, Ledger, Shipping Label, etc.)                 */
+/*  Backward-compat: simple page print                                 */
 /* ------------------------------------------------------------------ */
 
-/**
- * Plain "print this page" helper. Used by views that just want the browser
- * print dialog (no PDF, no share sheet). The invoice system uses
- * `printInvoice` above instead.
- */
 export function safePrint(): void {
   try {
     window.print();
   } catch (err) {
     console.error('Print failed', err);
   }
-}
+          }
